@@ -1,0 +1,92 @@
+#pragma once
+
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "FMassMuscleEditorModel.h"
+#include "Widgets/Layout/SWidgetSwitcher.h"
+#include "SMassMuscleHierarchy.h"
+#include "Widgets/Input/SComboBox.h"
+#include "FMassMuscleData.h"
+
+class SMassMuscleDetailsPannel : public SCompoundWidget
+{
+public:
+    SLATE_BEGIN_ARGS(SMassMuscleDetailsPannel) {}
+        SLATE_ARGUMENT(TSharedPtr<FMassMuscleEditorModel>, Model)
+        SLATE_ARGUMENT(TSharedPtr<class SMassMuscleHierarchy>, Hierarchy)
+    SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs);
+	
+private:
+    void OnSelectionChanged(FName NewSelectionName, EItemType Type);
+    TSharedPtr<FMassMuscleEditorModel> Model;
+    TSharedPtr<SWidgetSwitcher> PanelSwitcher;
+    void GetMuscleInfo(FName muscleName);
+    void GetBoneInfo(FName boneName);
+    FMassMuscleDataMuscle* SelectedMuscle;
+    FMassMuscleDataMass* SelectedBone;
+
+    void MarkDirtyMass() const;
+    void MarkDirtyMuscle() const;
+
+    TSharedPtr<SMassMuscleHierarchy> Hierarchy;
+
+    TOptional<float> GetBoneMass() const{
+        if(!SelectedBone) return 0;
+        return SelectedBone->Mass;
+    };
+    void OnMassChanged(float value) const{
+        if(SelectedBone){
+            SelectedBone->Mass = value;
+            SMassMuscleDetailsPannel::MarkDirtyMass();
+        }
+    }
+
+    FText GetMuscleName() const{return SelectedMuscle ? FText::FromName(SelectedMuscle->Name) : FText::FromString(TEXT(""));}
+    void CommitNewName(const FText& value, ETextCommit::Type CommitType) const{
+        if(value.ToString() == TEXT("")) return;
+        if(!Model) return;
+        if(!SelectedMuscle) return;
+        if(!Model->GetMuscleProfile()) return;
+        FName oldName = FName(SelectedMuscle->Name.ToString());
+        Model->GetMuscleProfile()->RenameMuscle(*SelectedMuscle, FName(value.ToString()));
+        Hierarchy->OnItemNameChanged(oldName, FName(SelectedMuscle->Name.ToString()));
+    }
+    TOptional<float> GetMuscleStrength() const{return SelectedMuscle? SelectedMuscle->Strength : 0;}
+    void OnStrengthChanged(float value) const {SelectedMuscle->Strength = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
+    TOptional<float> GetMaxRange() const{return SelectedMuscle? SelectedMuscle->MaxRange : 0;}
+    void OnMaxRangeChanged(float value) const {SelectedMuscle->MaxRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
+    TOptional<float> GetMinRange() const{return SelectedMuscle? SelectedMuscle->MinRange : 0;}
+    void OnMinRangeChanged(float value) const {SelectedMuscle->MinRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
+
+    TSharedPtr<class SComboBox<TSharedPtr<FString>>> MuscleComboBox;
+    TArray<TSharedPtr<FString>> MuscleChildOptions = {MakeShared<FString>(TEXT("None"))};
+    TSharedPtr<FString> MuscleChildCurrentSelection = MakeShared<FString>(TEXT("None"));
+
+    void OnChildBoneChanged(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+    {
+        if(!NewSelection.IsValid()) return;
+        if(!SelectedMuscle) return;
+        if(!Model) return;
+        if(!Model->GetMuscleProfile()) return;
+        SelectedMuscle->ChildBoneName = FName(*NewSelection);
+        MuscleChildCurrentSelection = NewSelection;
+        SMassMuscleDetailsPannel::MarkDirtyMuscle();
+    }
+
+    TArray<TSharedPtr<FString>> RotationOptions = {MakeShared<FString>(TEXT("Yaw")), MakeShared<FString>(TEXT("Pitch")), MakeShared<FString>(TEXT("Roll"))};
+    TSharedPtr<FString> MuscleRotationCurrentSelection = MakeShared<FString>(TEXT("None"));
+    void OnOrientationChanged(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+    {
+        if(!NewSelection.IsValid()) return;
+        if(!SelectedMuscle) return;
+        if(!Model) return;
+        if(!Model->GetMuscleProfile()) return;
+        if(*NewSelection == TEXT("Yaw")) SelectedMuscle->Orientation = ERotationType::Yaw;
+        else if(*NewSelection == TEXT("Pitch")) SelectedMuscle->Orientation = ERotationType::Pitch;
+        else if(*NewSelection == TEXT("Roll")) SelectedMuscle->Orientation = ERotationType::Roll;
+        MuscleRotationCurrentSelection = NewSelection;
+        SMassMuscleDetailsPannel::MarkDirtyMuscle();
+    }
+};

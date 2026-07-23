@@ -1,0 +1,12 @@
+/.cache
+/.git
+/.vs
+/.vscode
+/Backup
+/Content
+/DerivedDataCache
+/Intermediate
+/Models
+/Saved
+/Plugins/MassMuscleProfile/Content
+/Plugins/MassMuscleProfile/Intermediate
