@@ -1,6 +1,7 @@
 #include "FMassMuscleProfile.h"
 
 #include "Algo/Find.h"
+#include "BlueprintActionDatabase.h"
 #include "FMassMuscleProfileAssetActions.h"
 #include "SMassMuscleMainWidget.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -36,6 +37,14 @@ void FMassMuscleProfileModule::StartupModule()
     AssetTools.RegisterAssetTypeActions(AssetActionsMass.ToSharedRef());
 
     FMassMuscleStyle::Initialize();
+
+    if (FBlueprintActionDatabase* ActionDatabase = FBlueprintActionDatabase::TryGet())
+    {
+        if (UClass* ControlRigBlueprintClass = FindObject<UClass>(nullptr, TEXT("/Script/ControlRigDeveloper.ControlRigBlueprint")))
+        {
+            ActionDatabase->RefreshClassActions(ControlRigBlueprintClass);
+        }
+    }
 }
 
 void FMassMuscleProfileModule::ShutdownModule()
@@ -91,7 +100,7 @@ void FMassMuscleProfileModule::RegisterMenus()
 
     Section.AddMenuEntry(NAME_None, LOCTEXT("MassMuscleProfile", "Mass Muscle Profile"),
                          LOCTEXT("MassMuscleProfileTooltip", "Open Mass Muscle Editor"), FSlateIcon(),
-                         FUIAction(FExecuteAction::CreateLambda(
+                         FToolUIActionChoice(FExecuteAction::CreateLambda(
                              []() { FGlobalTabmanager::Get()->TryInvokeTab(FName("MassMuscleProfile")); })));
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CoreMinimal.h"
 
 enum class EItemType
 {
@@ -10,23 +11,23 @@ enum class EItemType
 
 struct FMassMuscleTreeItem
 {
-  FName Name;
+    FName Name;
 
-  int32 BoneIndex = INDEX_NONE;
+    int32 BoneIndex = INDEX_NONE;
 
-  int32 ParentIndex = INDEX_NONE;
+    int32 ParentIndex = INDEX_NONE;
 
-  TArray<TSharedPtr<FMassMuscleTreeItem>> Children;
-  EItemType ItemType;
+    TArray<TSharedPtr<FMassMuscleTreeItem>> Children;
+    EItemType ItemType;
 
-  FMassMuscleTreeItem(const FName& InName,
-                      int32 InBoneIndex,
-                      int32 InParentIndex,
-                      EItemType InItemType)
-    : Name(InName)
-    , BoneIndex(InBoneIndex)
-    , ParentIndex(InParentIndex)
-    , ItemType(InItemType)
-  {
-  }
+    FMassMuscleTreeItem(const FName& InName,
+                        int32 InBoneIndex,
+                        int32 InParentIndex,
+                        EItemType InItemType)
+        : Name(InName)
+        , BoneIndex(InBoneIndex)
+        , ParentIndex(InParentIndex)
+        , ItemType(InItemType)
+    {
+    }
 };

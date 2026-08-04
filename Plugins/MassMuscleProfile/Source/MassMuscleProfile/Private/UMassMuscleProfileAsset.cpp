@@ -1,4 +1,3 @@
-#include "CoreMinimal.h"
 #include "UMassMuscleProfileAsset.h"
 #include "FMassMuscleData.h"
 #include "Engine/SkeletalMesh.h"

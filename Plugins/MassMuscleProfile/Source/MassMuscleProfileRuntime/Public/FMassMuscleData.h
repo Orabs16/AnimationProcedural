@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "Curves/CurveFloat.h"
 #include "FMassMuscleData.generated.h"
 
 UENUM(BlueprintType)

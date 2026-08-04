@@ -25,7 +25,8 @@ public class MassMuscleProfile : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core"
+				"Core",
+				"MassMuscleProfileRuntime"
 			}
 		);
 
@@ -34,6 +35,7 @@ public class MassMuscleProfile : ModuleRules
 			{
 				"CoreUObject",
 				"Engine",
+				"BlueprintGraph",
 
 				"Slate",
 				"SlateCore",
@@ -54,7 +56,8 @@ public class MassMuscleProfile : ModuleRules
     			"ContentBrowser",
 				"EditorWidgets",
 				"AdvancedPreviewScene",
-				"AssetTools"
+				"AssetTools",
+				"ControlRigDeveloper"
 			}
 		);
 
