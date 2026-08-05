@@ -18,7 +18,38 @@
 			"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64\\dotnet.exe",
 			"DOTNET_MULTILEVEL_LOOKUP": "0",
 			"DOTNET_ROLL_FORWARD": "LatestMajor"
-		}
+		},
+		"clangd.arguments": [
+			"-header-insertion=iwyu",
+			"-header-insertion-decorators=true",
+			"-all-scopes-completion=true",
+			"-limit-results=100",
+			"-background-index=true",
+			"-limit-references=2000",
+			"-completion-style=detailed",
+			"-function-arg-placeholders=true",
+			"-log=info"
+		],
+		"clangd.path": "c:\\Program Files\\LLVM\\bin\\clangd.exe",
+		"clangd.detectExtensionConflicts": false,
+		"files.associations": {
+			"*.clangd": "yaml",
+			"*.clang-format": "yaml",
+			"*.clang-tidy": "yaml"
+		},
+		"workbench.colorCustomizations": {
+			"editorInlayHint.foreground": "#a2a2a2c0",
+			"editorInlayHint.background": "#00000000"
+		},
+		"editor.semanticTokenColorCustomizations": {
+			"enabled": true,
+			"rules": {
+				"variable": "#d68306",
+				"parameter": "#d68306",
+				"property": "#d68306"
+			}
+		},
+		"editor.suggestFontSize": 0
 	},
 	"extensions": {
 		"recommendations": [
@@ -471,8 +502,7 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-Debug.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Debug Build",
-				"args": [
-				],
+				"args": [],
 				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
@@ -489,8 +519,7 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-DebugGame.exe",
 				"preLaunchTask": "AnimationProcedural Win64 DebugGame Build",
-				"args": [
-				],
+				"args": [],
 				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
@@ -507,8 +536,7 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Development Build",
-				"args": [
-				],
+				"args": [],
 				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
@@ -525,8 +553,7 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-Test.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Test Build",
-				"args": [
-				],
+				"args": [],
 				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
@@ -543,8 +570,7 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-Shipping.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Shipping Build",
-				"args": [
-				],
+				"args": [],
 				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",

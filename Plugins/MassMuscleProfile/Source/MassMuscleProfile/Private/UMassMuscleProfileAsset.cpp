@@ -1,6 +1,30 @@
 #include "UMassMuscleProfileAsset.h"
 #include "FMassMuscleData.h"
 #include "Engine/SkeletalMesh.h"
+
+void UMassMuscleProfileAssetMuscle::PostLoad()
+{
+    Super::PostLoad();
+    EnsureMuscleCurvesInitialized();
+}
+
+bool UMassMuscleProfileAssetMuscle::EnsureMuscleCurvesInitialized()
+{
+    bool bUpdatedAnyMuscle = false;
+
+    for (FMassMuscleDataMuscle& Muscle : Muscles)
+    {
+        bUpdatedAnyMuscle |= Muscle.EnsureDefaultStrengthCurvesInitialized();
+    }
+
+    if (bUpdatedAnyMuscle)
+    {
+        MarkPackageDirty();
+    }
+
+    return bUpdatedAnyMuscle;
+}
+
 void UMassMuscleProfileAssetMass::InitializeFromSkeletalMesh(USkeletalMesh* InSkeletalMesh)
 {
     if (!InSkeletalMesh)

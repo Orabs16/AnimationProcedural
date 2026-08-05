@@ -85,7 +85,7 @@ void FMassMuscleViewportClient::Draw(const FSceneView* View, FPrimitiveDrawInter
 {
 	FEditorViewportClient::Draw(View, PDI);
 
-	if (!PreviewMeshComponent)
+	if (!PreviewMeshComponent || !PreviewMeshComponent->GetSkeletalMeshAsset())
 		return;
 
 	const FReferenceSkeleton& RefSkeleton = PreviewMeshComponent->GetSkeletalMeshAsset()->GetRefSkeleton();

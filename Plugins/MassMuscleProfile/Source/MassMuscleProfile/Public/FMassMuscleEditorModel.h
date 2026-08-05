@@ -21,7 +21,6 @@ public:
     FName           GetSelected()    const { return Selected; }
     UMassMuscleProfileAssetMuscle* GetMuscleProfile() const { return MuscleProfile; }
     UMassMuscleProfileAssetMass* GetMassProfile() const { return MassProfile; }
-    FVector MyVector;  
     EItemType GetSelectedType() const {return SelectedType; }
 
     void SetSkeletalMesh(USkeletalMesh* InMesh)
@@ -161,7 +160,8 @@ public:
             {
                 MuscleProfile->Muscles[MirrorIndex].MaxRange = Muscle.MaxRange;
                 MuscleProfile->Muscles[MirrorIndex].MinRange = Muscle.MinRange;
-                MuscleProfile->Muscles[MirrorIndex].Strength = Muscle.Strength;
+                MuscleProfile->Muscles[MirrorIndex].ExtensionStrength = Muscle.ExtensionStrength;
+                MuscleProfile->Muscles[MirrorIndex].FlexionStrength = Muscle.FlexionStrength;
                 MuscleProfile->Muscles[MirrorIndex].Orientation = Muscle.Orientation;
                 continue;
             }

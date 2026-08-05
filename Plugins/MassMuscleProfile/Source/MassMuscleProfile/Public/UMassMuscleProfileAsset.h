@@ -12,12 +12,16 @@ class MASSMUSCLEPROFILE_API UMassMuscleProfileAssetMuscle : public UDataAsset
 
 public:
 
+    virtual void PostLoad() override;
+
     
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SkeletalMesh")
     USkeletalMesh* SkeletalMesh;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Muscles")
     TArray<FMassMuscleDataMuscle> Muscles;
+
+    bool EnsureMuscleCurvesInitialized();
 
     
 
@@ -85,8 +89,7 @@ public:
             NewChildBoneName,
             ERotationType::Yaw,
             -45.f,
-            45.f,
-            1.f
+            45.f
         );
         Muscles.Add(OutNewMuscle);
         MarkPackageDirty();   // tells UE the asset has unsaved changes

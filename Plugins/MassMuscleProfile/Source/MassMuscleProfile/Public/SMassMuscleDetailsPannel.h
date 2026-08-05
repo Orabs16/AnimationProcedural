@@ -6,7 +6,12 @@
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "SMassMuscleHierarchy.h"
 #include "Widgets/Input/SComboBox.h"
+#include "UObject/StrongObjectPtr.h"
 #include "FMassMuscleData.h"
+
+class IDetailsView;
+class UMassMuscleCurveEditorProxy;
+struct FPropertyChangedEvent;
 
 class SMassMuscleDetailsPannel : public SCompoundWidget
 {
@@ -26,9 +31,15 @@ private:
     void GetBoneInfo(FName boneName);
     FMassMuscleDataMuscle* SelectedMuscle;
     FMassMuscleDataMass* SelectedBone;
+    TSharedPtr<IDetailsView> CurveDetailsView;
+    TStrongObjectPtr<UMassMuscleCurveEditorProxy> CurveProxy;
+    bool bUpdatingCurveProxy = false;
 
     void MarkDirtyMass() const;
     void MarkDirtyMuscle() const;
+    void SyncCurveProxyFromSelectedMuscle();
+    void ApplyCurveProxyToSelectedMuscle() const;
+    void OnCurveDetailsChanged(const FPropertyChangedEvent& PropertyChangedEvent);
 
     TSharedPtr<SMassMuscleHierarchy> Hierarchy;
 
@@ -53,8 +64,6 @@ private:
         Model->GetMuscleProfile()->RenameMuscle(*SelectedMuscle, FName(value.ToString()));
         Hierarchy->OnItemNameChanged(oldName, FName(SelectedMuscle->Name.ToString()));
     }
-    TOptional<float> GetMuscleStrength() const{return SelectedMuscle? SelectedMuscle->Strength : 0;}
-    void OnStrengthChanged(float value) const {SelectedMuscle->Strength = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
     TOptional<float> GetMaxRange() const{return SelectedMuscle? SelectedMuscle->MaxRange : 0;}
     void OnMaxRangeChanged(float value) const {SelectedMuscle->MaxRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
     TOptional<float> GetMinRange() const{return SelectedMuscle? SelectedMuscle->MinRange : 0;}

@@ -11,7 +11,6 @@ class FMassMuscleViewportClient : public FEditorViewportClient, public TSharedFr
 {
 public:
 	void SetSkeletalMesh(USkeletalMesh* Mesh);
-	void SetSelectedBone(FName BoneName);
 	FMassMuscleViewportClient(FPreviewScene* InPreviewScene, TSharedPtr<FMassMuscleEditorModel> InModel = nullptr, TSharedPtr<FMassMuscleEditorSettings> InSettings = nullptr);
 
 	void SetModel(TSharedPtr<FMassMuscleEditorModel> InModel)
@@ -46,8 +45,6 @@ private:
 	void DrawSingleArc(FPrimitiveDrawInterface* PDI, FMassMuscleDataMuscle* Muscle);
 	void DrawAllMuscleArcs(FPrimitiveDrawInterface* PDI, UMassMuscleProfileAssetMuscle* profile);
 	void DrawSelectedBone(FPrimitiveDrawInterface *PDI, const FReferenceSkeleton &RefSkeleton);
-	float GetGizmoScale(const FVector& Origin, const FSceneView* View) const;
-	void DrawRotationGizmo(FPrimitiveDrawInterface* PDI, const FVector& Origin, float Scale);
 
 	float ComputeAngleFromMouse(FViewport* InViewport, int32 X, int32 Y) const;
 	bool bIsDraggingHandle = false;

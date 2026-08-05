@@ -1,6 +1,5 @@
 #include "FMassMuscleProfile.h"
 
-#include "Algo/Find.h"
 #include "BlueprintActionDatabase.h"
 #include "FMassMuscleProfileAssetActions.h"
 #include "SMassMuscleMainWidget.h"
@@ -20,7 +19,6 @@ static const FName MassMuscleTabName("MassMuscleProfile");
 
 void FMassMuscleProfileModule::StartupModule()
 {
-    UE_LOG(LogTemp, Warning, TEXT("MassMuscleProfile Loaded!"));
     FGlobalTabmanager::Get()
         ->RegisterNomadTabSpawner(MassMuscleTabName,
                                   FOnSpawnTab::CreateRaw(this, &FMassMuscleProfileModule::SpawnPluginTab))
@@ -58,8 +56,6 @@ void FMassMuscleProfileModule::ShutdownModule()
         AssetTools.UnregisterAssetTypeActions(AssetActionsMuscle.ToSharedRef());
         AssetTools.UnregisterAssetTypeActions(AssetActionsMass.ToSharedRef());
     }
-
-    FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(MassMuscleTabName);
 
     FMassMuscleStyle::Shutdown();
 }

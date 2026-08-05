@@ -2,7 +2,7 @@
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
-	"FriendlyName": "MassMuscleProfile",
+	"FriendlyName": "AgentSolver",
 	"Description": "",
 	"Category": "Other",
 	"CreatedBy": "",
@@ -14,20 +14,10 @@
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,
-	"Plugins": [
-		{
-			"Name": "ControlRig",
-			"Enabled": true
-		},
-		{
-			"Name": "RigVM",
-			"Enabled": true
-		}
-	],
 	"Modules": [
 		{
-			"Name": "MassMuscleProfile",
-			"Type": "Editor",
+			"Name": "AgentSolver",
+			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}
 	]

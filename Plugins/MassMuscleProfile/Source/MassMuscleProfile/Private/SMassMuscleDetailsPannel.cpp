@@ -18,17 +18,34 @@
 #include "SMassMuscleExpandableSection.h"
 #include "SMassMuscleItemRow.h"
 #include "FMassMuscleEditorModel.h"
+#include "IDetailsView.h"
+#include "MassMuscleCurveEditorProxy.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "FMassMuscleData.h"
 #include "Widgets/Input/SEditableTextBox.h"
 
-
-FVector MyVector = FVector::ForwardVector;
 void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
 {
     Model = InArgs._Model;
     Hierarchy = InArgs._Hierarchy;
 	Model->OnSelectionChanged.AddSP(this, &SMassMuscleDetailsPannel::OnSelectionChanged);
+
+    CurveProxy.Reset(NewObject<UMassMuscleCurveEditorProxy>(GetTransientPackage()));
+
+    FDetailsViewArgs DetailsViewArgs;
+    DetailsViewArgs.bAllowSearch = false;
+    DetailsViewArgs.bHideSelectionTip = true;
+    DetailsViewArgs.bLockable = false;
+    DetailsViewArgs.bShowOptions = false;
+    DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+
+    FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+    CurveDetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
+    CurveDetailsView->SetObject(CurveProxy.Get());
+    CurveDetailsView->OnFinishedChangingProperties().AddSP(this, &SMassMuscleDetailsPannel::OnCurveDetailsChanged);
+
     SAssignNew(MuscleComboBox, SComboBox<TSharedPtr<FString>>)
     .OptionsSource(&MuscleChildOptions)
     .OnGenerateWidget_Lambda([](TSharedPtr<FString> InOption)
@@ -133,17 +150,7 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                 SNew(SMassMuscleItemRow)
                 +SMassMuscleItemRow::Slot()
                 [
-                     SNew(STextBlock).Text(FText::FromString("Strength"))
-                ]
-                +SMassMuscleItemRow::Slot()
-                [
-                    SNew(SNumericEntryBox<float>)
-                    .Value(this, &SMassMuscleDetailsPannel::GetMuscleStrength)
-                    .OnValueChanged(this, &SMassMuscleDetailsPannel::OnStrengthChanged)
-                    .AllowSpin(true) 
-                    .MinValue(0.0f)
-                    .MaxValue(TOptional<float>())        // explicitly no max
-                    .MaxSliderValue(TOptional<float>())  // explicitly no slider max
+                     SNew(STextBlock).Text(FText::FromString("Extension/Flexion Curves"))
                 ]
             ]
             +SMassMuscleExpandableSection::Slot()
@@ -216,6 +223,14 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                     ]
                 ]
             ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SBorder)
+                .Padding(4.0f)
+                [
+                    CurveDetailsView.ToSharedRef()
+                ]
+            ]
         ]
         
     ];
@@ -260,7 +275,7 @@ void SMassMuscleDetailsPannel::GetMuscleInfo(FName MuscleName)
     }
     MuscleChildCurrentSelection = SelectedMuscle->ChildBoneName != NAME_None ? MakeShared<FString>(SelectedMuscle->ChildBoneName.ToString()) : MakeShared<FString>(TEXT("None"));
     MuscleRotationCurrentSelection = MakeShared<FString>(RotationTypeToString(SelectedMuscle->Orientation));
-    UE_LOG(LogTemp, Warning, TEXT("Rotation changed to : %hs"), RotationTypeToString(SelectedMuscle->Orientation))
+    SyncCurveProxyFromSelectedMuscle();
 }
 
 void SMassMuscleDetailsPannel::GetBoneInfo(FName boneName)
@@ -291,5 +306,41 @@ void SMassMuscleDetailsPannel::MarkDirtyMass() const
         return;
     } 
     profile->NotifyMassChange();
+}
+
+void SMassMuscleDetailsPannel::SyncCurveProxyFromSelectedMuscle()
+{
+    if (!CurveProxy.IsValid() || !CurveDetailsView.IsValid() || !SelectedMuscle)
+    {
+        return;
+    }
+
+    bUpdatingCurveProxy = true;
+    CurveProxy->ExtensionStrength = SelectedMuscle->ExtensionStrength;
+    CurveProxy->FlexionStrength = SelectedMuscle->FlexionStrength;
+    CurveDetailsView->SetObject(CurveProxy.Get());
+    bUpdatingCurveProxy = false;
+}
+
+void SMassMuscleDetailsPannel::ApplyCurveProxyToSelectedMuscle() const
+{
+    if (!CurveProxy.IsValid() || !SelectedMuscle)
+    {
+        return;
+    }
+
+    SelectedMuscle->ExtensionStrength = CurveProxy->ExtensionStrength;
+    SelectedMuscle->FlexionStrength = CurveProxy->FlexionStrength;
+}
+
+void SMassMuscleDetailsPannel::OnCurveDetailsChanged(const FPropertyChangedEvent& PropertyChangedEvent)
+{
+    if (bUpdatingCurveProxy)
+    {
+        return;
+    }
+
+    ApplyCurveProxyToSelectedMuscle();
+    MarkDirtyMuscle();
 }
 
