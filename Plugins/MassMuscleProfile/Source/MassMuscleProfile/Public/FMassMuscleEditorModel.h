@@ -117,24 +117,6 @@ public:
         if(!MuscleProfile) return;
         if(!MuscleProfile->SkeletalMesh) return;
 
-        auto MirrorName = [](FName Name = NAME_None)
-        {
-            FName MirroredName = Name;
-            if (MirroredName != NAME_None)
-            {
-                FString NameString = MirroredName.ToString();
-                if (NameString.Contains(TEXT("_R")))
-                {
-                    MirroredName = FName(*MirroredName.ToString().Replace(TEXT("_R"), TEXT("_L")));
-                }
-                else if (NameString.Contains(TEXT("_L")))
-                {
-                    MirroredName = FName(*MirroredName.ToString().Replace(TEXT("_L"), TEXT("_R")));
-                }
-            }
-            return MirroredName;
-        };
-
         for (const TSharedPtr<FMassMuscleTreeItem>& SelectedItem : SelectedItems)
         {
             if (!SelectedItem.IsValid() || SelectedItem->ItemType != EItemType::Muscle)
@@ -154,7 +136,7 @@ public:
                 continue;
             }
 
-            const FName MirrorMuscleName = MirrorName(Muscle.Name);
+            const FName MirrorMuscleName = GetMirrorBoneName(Muscle.Name);
             const int32 MirrorIndex = MuscleProfile->FindMuscleByName(MirrorMuscleName);
             if (MirrorIndex != INDEX_NONE)
             {
@@ -166,7 +148,7 @@ public:
                 continue;
             }
 
-            const FName MirrorBone = MirrorName(Muscle.BoneName);
+            const FName MirrorBone = GetMirrorBoneName(Muscle.BoneName);
             const int32 MirrorBoneIndex = MuscleProfile->SkeletalMesh->GetRefSkeleton().FindBoneIndex(MirrorBone);
             if (MirrorBoneIndex == INDEX_NONE)
             {
@@ -193,9 +175,65 @@ public:
         OnMuscleDataChanged.Broadcast();
     }
 
+    // Copies capsule geometry (Radius, CapsuleHalfHeight) from each selected
+    // bone onto its L/R mirror bone — every bone already has a Mass entry
+    // (populated 1:1 from the skeleton by InitializeFromSkeletalMesh), so
+    // unlike MirrorMuscles there's no "create if missing" case to handle.
+    void MirrorCapsules(const TArray<TSharedPtr<FMassMuscleTreeItem>>& SelectedItems)
+    {
+        if(!MassProfile) return;
+
+        for (const TSharedPtr<FMassMuscleTreeItem>& SelectedItem : SelectedItems)
+        {
+            if (!SelectedItem.IsValid() || SelectedItem->ItemType != EItemType::Bone)
+            {
+                continue;
+            }
+
+            const int32 BoneMassIndex = MassProfile->FindBoneByName(SelectedItem->Name);
+            if (BoneMassIndex == INDEX_NONE)
+            {
+                continue;
+            }
+
+            const FName MirrorBoneName = GetMirrorBoneName(SelectedItem->Name);
+            const int32 MirrorMassIndex = MassProfile->FindBoneByName(MirrorBoneName);
+            if (MirrorMassIndex == INDEX_NONE)
+            {
+                continue;
+            }
+
+            MassProfile->Mass[MirrorMassIndex].Radius = MassProfile->Mass[BoneMassIndex].Radius;
+            MassProfile->Mass[MirrorMassIndex].CapsuleHalfHeight = MassProfile->Mass[BoneMassIndex].CapsuleHalfHeight;
+        }
+
+        MassProfile->MarkPackageDirty();
+    }
+
     FOnAddMuscle             OnMuscleAdd;
     FOnMuscleDataChanged     OnMuscleDataChanged;
 private:
+    // Swaps a name's _L/_R suffix (case-insensitive), leaving it unchanged if
+    // it has neither — shared by MirrorMuscles and MirrorCapsules.
+    static FName GetMirrorBoneName(FName Name)
+    {
+        if (Name == NAME_None)
+        {
+            return Name;
+        }
+        const FString NameString = Name.ToString();
+        const FString Suffix = NameString.Right(2).ToUpper();
+        if (Suffix == TEXT("_R"))
+        {
+            return FName(NameString.LeftChop(2) + TEXT("_L"));
+        }
+        if (Suffix == TEXT("_L"))
+        {
+            return FName(NameString.LeftChop(2) + TEXT("_R"));
+        }
+        return Name;
+    }
+
     TObjectPtr<USkeletalMesh> SkeletalMesh = nullptr;
     FName                     Selected = TEXT("");
     int32                     SelectedBoneIndex = INDEX_NONE;

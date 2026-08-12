@@ -22,11 +22,13 @@ public:
 private:
 	FReply OnXRaySkeleton();
 	FReply OnXRayMuscles();
+	FReply OnXRayCapsules();
 	FReply OnCollapse();
 	FReply OnExtend();
 	FReply OnNewMuscle();
 	FReply OnSaveClicked();
 	FReply OnMirrorMuscles();
+	FReply OnMirrorCapsules();
 	FReply OnDeleteMuscles();
 	bool IsHierarchyCollapsed = false;
     TSharedPtr<FMassMuscleEditorSettings> Settings;

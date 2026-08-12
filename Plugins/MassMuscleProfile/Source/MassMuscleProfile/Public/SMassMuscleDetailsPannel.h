@@ -6,6 +6,7 @@
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "SMassMuscleHierarchy.h"
 #include "Widgets/Input/SComboBox.h"
+#include "Styling/SlateTypes.h"
 #include "UObject/StrongObjectPtr.h"
 #include "FMassMuscleData.h"
 
@@ -25,12 +26,13 @@ public:
 	
 private:
     void OnSelectionChanged(FName NewSelectionName, EItemType Type);
+    void OnMuscleDataChanged();
     TSharedPtr<FMassMuscleEditorModel> Model;
     TSharedPtr<SWidgetSwitcher> PanelSwitcher;
     void GetMuscleInfo(FName muscleName);
     void GetBoneInfo(FName boneName);
-    FMassMuscleDataMuscle* SelectedMuscle;
-    FMassMuscleDataMass* SelectedBone;
+    FMassMuscleDataMuscle* SelectedMuscle = nullptr;
+    FMassMuscleDataMass* SelectedBone = nullptr;
     TSharedPtr<IDetailsView> CurveDetailsView;
     TStrongObjectPtr<UMassMuscleCurveEditorProxy> CurveProxy;
     bool bUpdatingCurveProxy = false;
@@ -54,6 +56,49 @@ private:
         }
     }
 
+    TOptional<float> GetBoneRadius() const{
+        if(!SelectedBone) return 0;
+        return SelectedBone->Radius;
+    };
+    void OnRadiusChanged(float value) const{
+        if(SelectedBone){
+            SelectedBone->Radius = value;
+            SMassMuscleDetailsPannel::MarkDirtyMass();
+        }
+    }
+
+    TOptional<float> GetCapsuleHalfHeight() const{
+        if(!SelectedBone) return 0;
+        return SelectedBone->CapsuleHalfHeight;
+    };
+    void OnCapsuleHalfHeightChanged(float value) const{
+        if(SelectedBone){
+            SelectedBone->CapsuleHalfHeight = value;
+            SMassMuscleDetailsPannel::MarkDirtyMass();
+        }
+    }
+
+    TOptional<float> GetExtensionStrength() const{return SelectedMuscle ? SelectedMuscle->ExtensionStrength : 0;}
+    void OnExtensionStrengthChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->ExtensionStrength = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
+    TOptional<float> GetFlexionStrength() const{return SelectedMuscle ? SelectedMuscle->FlexionStrength : 0;}
+    void OnFlexionStrengthChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->FlexionStrength = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
+
+    ECheckBoxState GetCanTouchGround() const
+    {
+        return (SelectedBone && SelectedBone->CanTouchGround)
+            ? ECheckBoxState::Checked
+            : ECheckBoxState::Unchecked;
+    }
+
+    void OnCanTouchGroundChanged(ECheckBoxState NewState) const
+    {
+        if (SelectedBone)
+        {
+            SelectedBone->CanTouchGround = (NewState == ECheckBoxState::Checked);
+            SMassMuscleDetailsPannel::MarkDirtyMass();
+        }
+    }
+
     FText GetMuscleName() const{return SelectedMuscle ? FText::FromName(SelectedMuscle->Name) : FText::FromString(TEXT(""));}
     void CommitNewName(const FText& value, ETextCommit::Type CommitType) const{
         if(value.ToString() == TEXT("")) return;
@@ -65,9 +110,9 @@ private:
         Hierarchy->OnItemNameChanged(oldName, FName(SelectedMuscle->Name.ToString()));
     }
     TOptional<float> GetMaxRange() const{return SelectedMuscle? SelectedMuscle->MaxRange : 0;}
-    void OnMaxRangeChanged(float value) const {SelectedMuscle->MaxRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
+    void OnMaxRangeChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->MaxRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
     TOptional<float> GetMinRange() const{return SelectedMuscle? SelectedMuscle->MinRange : 0;}
-    void OnMinRangeChanged(float value) const {SelectedMuscle->MinRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle();}
+    void OnMinRangeChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->MinRange = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
 
     TSharedPtr<class SComboBox<TSharedPtr<FString>>> MuscleComboBox;
     TArray<TSharedPtr<FString>> MuscleChildOptions = {MakeShared<FString>(TEXT("None"))};

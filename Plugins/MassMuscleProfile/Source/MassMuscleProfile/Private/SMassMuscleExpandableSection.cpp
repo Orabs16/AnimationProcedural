@@ -22,7 +22,7 @@ void SMassMuscleExpandableSection::Construct(const FArguments& InArgs)
     for (int32 i = 0; i < ContentSlots.Num(); ++i)
     {
         ContentBox->AddSlot()
-        .FillHeight(1.f)
+        .AutoHeight()
         .Padding(FMargin(0,1,0,(i+1) < ContentSlots.Num()? 0 : 1))
         [
             ContentSlots[i].GetWidget()

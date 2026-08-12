@@ -147,6 +147,17 @@ void SMassMuscleButtonPanel::Construct(const FArguments& InArgs)
         [
             SNew(SButton)
             .HAlign(HAlign_Center)
+            .Text(FText::FromString("XRay Capsules"))
+            .OnClicked(this, &SMassMuscleButtonPanel::OnXRayCapsules)
+        ]
+
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .VAlign(VAlign_Center)
+        .Padding(10,0,10,0)
+        [
+            SNew(SButton)
+            .HAlign(HAlign_Center)
             .Text(FText::FromString("New Muscle"))
             .OnClicked(this, &SMassMuscleButtonPanel::OnNewMuscle)
         ]
@@ -170,6 +181,16 @@ void SMassMuscleButtonPanel::Construct(const FArguments& InArgs)
             .Text(FText::FromString("Mirror Muscles"))
             .OnClicked(this, &SMassMuscleButtonPanel::OnMirrorMuscles)
         ]
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .VAlign(VAlign_Center)
+        .Padding(10,0,10,0)
+        [
+            SNew(SButton)
+            .HAlign(HAlign_Center)
+            .Text(FText::FromString("Mirror Capsules"))
+            .OnClicked(this, &SMassMuscleButtonPanel::OnMirrorCapsules)
+        ]
     ];
 }
 
@@ -182,6 +203,11 @@ FReply SMassMuscleButtonPanel::OnXRaySkeleton()
 FReply SMassMuscleButtonPanel::OnXRayMuscles()
 {
     Settings->XRayMuscles = !Settings->XRayMuscles;
+    return FReply::Handled();
+}
+FReply SMassMuscleButtonPanel::OnXRayCapsules()
+{
+    Settings->XRayCapsules = !Settings->XRayCapsules;
     return FReply::Handled();
 }
 
@@ -222,6 +248,15 @@ FReply SMassMuscleButtonPanel::OnMirrorMuscles()
     TArray<TSharedPtr<FMassMuscleTreeItem>> SelectedItems = HierarchyWidget->GetSelectedItems();
     if(SelectedItems.Num() == 0) return FReply::Handled();
     Model->MirrorMuscles(SelectedItems, std::bind(&SMassMuscleHierarchy::OnAddMuscle, HierarchyWidget.Get(), std::placeholders::_1));
+    return FReply::Handled();
+}
+FReply SMassMuscleButtonPanel::OnMirrorCapsules()
+{
+    if(!Model) return FReply::Handled();
+    if(!HierarchyWidget) return FReply::Handled();
+    TArray<TSharedPtr<FMassMuscleTreeItem>> SelectedItems = HierarchyWidget->GetSelectedItems();
+    if(SelectedItems.Num() == 0) return FReply::Handled();
+    Model->MirrorCapsules(SelectedItems);
     return FReply::Handled();
 }
 

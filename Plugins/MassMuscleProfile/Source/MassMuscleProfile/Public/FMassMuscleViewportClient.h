@@ -45,6 +45,9 @@ private:
 	void DrawSingleArc(FPrimitiveDrawInterface* PDI, FMassMuscleDataMuscle* Muscle);
 	void DrawAllMuscleArcs(FPrimitiveDrawInterface* PDI, UMassMuscleProfileAssetMuscle* profile);
 	void DrawSelectedBone(FPrimitiveDrawInterface *PDI, const FReferenceSkeleton &RefSkeleton);
+	void DrawBoneCapsule(FPrimitiveDrawInterface *PDI, const FReferenceSkeleton &RefSkeleton);
+	void DrawAllBoneCapsules(FPrimitiveDrawInterface *PDI, const FReferenceSkeleton &RefSkeleton, UMassMuscleProfileAssetMass* MassProfile);
+	void DrawSingleBoneCapsule(FPrimitiveDrawInterface *PDI, const FReferenceSkeleton &RefSkeleton, int32 BoneIndex, const struct FMassMuscleDataMass& BoneMass);
 
 	float ComputeAngleFromMouse(FViewport* InViewport, int32 X, int32 Y) const;
 	bool bIsDraggingHandle = false;

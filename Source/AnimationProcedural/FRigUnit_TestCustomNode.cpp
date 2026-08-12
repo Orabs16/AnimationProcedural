@@ -2,7 +2,6 @@
 
 FRigUnit_TestCustomNode_Execute()
 {
-    Output = Value % Ratio;
-    
+    Output = Ratio != 0 ? Value % Ratio : 0;
 }
 

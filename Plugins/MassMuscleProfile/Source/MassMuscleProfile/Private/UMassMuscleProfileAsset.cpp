@@ -14,7 +14,7 @@ bool UMassMuscleProfileAssetMuscle::EnsureMuscleCurvesInitialized()
 
     for (FMassMuscleDataMuscle& Muscle : Muscles)
     {
-        bUpdatedAnyMuscle |= Muscle.EnsureDefaultStrengthCurvesInitialized();
+        bUpdatedAnyMuscle |= EnsureDefaultStrengthCurvesInitialized(Muscle);
     }
 
     if (bUpdatedAnyMuscle)

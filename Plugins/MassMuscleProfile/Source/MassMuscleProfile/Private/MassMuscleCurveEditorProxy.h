@@ -12,8 +12,8 @@ class UMassMuscleCurveEditorProxy : public UObject
 
 public:
     UPROPERTY(EditAnywhere, Category = "Muscle")
-    FRuntimeFloatCurve ExtensionStrength;
+    FRuntimeFloatCurve ExtensionStrengthCurve;
 
     UPROPERTY(EditAnywhere, Category = "Muscle")
-    FRuntimeFloatCurve FlexionStrength;
+    FRuntimeFloatCurve FlexionStrengthCurve;
 };

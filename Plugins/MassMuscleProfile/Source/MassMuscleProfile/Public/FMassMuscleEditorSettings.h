@@ -9,6 +9,7 @@ class FMassMuscleEditorSettings
 public:
     bool XRaySkeleton = true;
     bool XRayMuscles = false;
+    bool XRayCapsules = false;
     void SetHierarchy(bool value){
         HierarchyIsExtended = value;
         if(value) OnHierarchyExtend.Broadcast();

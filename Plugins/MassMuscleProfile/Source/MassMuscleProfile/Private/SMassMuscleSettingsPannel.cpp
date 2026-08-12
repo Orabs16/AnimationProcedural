@@ -59,6 +59,7 @@ void SMassMuscleSettingsPannel::Construct(const FArguments &InArgs)
                 .OnShouldFilterAsset_Lambda([this](const FAssetData& AssetData) -> bool
                 {
                     UMassMuscleProfileAssetMuscle* profile = Cast<UMassMuscleProfileAssetMuscle>(AssetData.GetAsset());
+                    if (!profile || !profile->SkeletalMesh) return false;
                     return profile->SkeletalMesh->GetPathName() != (Model->GetSkeletalMesh() ? Model->GetSkeletalMesh()->GetPathName() : FString());
                 })
             ]
@@ -82,6 +83,7 @@ void SMassMuscleSettingsPannel::Construct(const FArguments &InArgs)
                 .OnShouldFilterAsset_Lambda([this](const FAssetData& AssetData) -> bool
                 {
                     UMassMuscleProfileAssetMass* profile = Cast<UMassMuscleProfileAssetMass>(AssetData.GetAsset());
+                    if (!profile || !profile->SkeletalMesh) return false;
                     return profile->SkeletalMesh->GetPathName() != (Model->GetSkeletalMesh() ? Model->GetSkeletalMesh()->GetPathName() : FString());
                 })
             ]

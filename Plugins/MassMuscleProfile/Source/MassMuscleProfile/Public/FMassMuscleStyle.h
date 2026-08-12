@@ -20,6 +20,7 @@ public:
 	inline static const FLinearColor MuscleText                         = FLinearColor(FColor(255,130,130,255));
 	inline static const FLinearColor MuscleColor                        = FLinearColor(FColor(255,130,130,120));
 	inline static const FLinearColor BoneColor							= FLinearColor(FColor(105, 181, 205, 120));
+	inline static const FLinearColor MassCapsuleColor						= FLinearColor(FColor(120, 220, 140, 160));
 
 
 private:

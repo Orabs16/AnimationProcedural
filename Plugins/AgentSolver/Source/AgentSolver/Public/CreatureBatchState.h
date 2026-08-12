@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Curves/CurveFloat.h"
 
 /**
  * Static description of a single creature's kinematic tree.
@@ -40,9 +41,68 @@ struct FCreatureTopology
 	// dependency on the child's not-yet-computed world rotation.
 	TArray<FVector> BodyJointAxisLocal;      // revolute axis, in parent's rest frame
 	TArray<FVector> BodyJointOffsetInParent; // joint location, in parent's rest frame
+	// Body's bind-pose rotation relative to its parent's rest frame — the same
+	// thing a "Make Relative (Parent to Child)" node would give you. Without
+	// this, the forward kinematics in CreatureBatchSolver.h would implicitly
+	// treat every body's rest orientation as identical to its parent's (since
+	// only the offset TRANSLATION was ever composed in, never the rest
+	// ROTATION), collapsing the whole skeleton to "every bone points wherever
+	// the torso points" at JointPos==0 regardless of how the rig is actually
+	// authored. Index 0 (root) is NOT read by the FK pass (Body 0 has no
+	// parent, the FK loop starts at Body 1) — callers are free to repurpose
+	// it, e.g. Muto's topology stores the torso's own bind-pose rotation in
+	// COMPONENT space there, since "standing" reset needs that and it isn't
+	// used for anything else.
+	TArray<FQuat> BodyRestRotInParent;
 	TArray<FVector> BodyLocalCoMOffset;      // CoM offset from joint origin, body's own rest frame
 	TArray<float>   BodyMass;
 	TArray<FVector> BodyInertiaDiagLocal;    // diagonal inertia about CoM, body's own rest frame
+
+	// Rest-pose offset (body's own rest frame) from this body's origin to an
+	// unarticulated "fused" child bone hanging past it, if any — ZeroVector
+	// for every body without one. Added for Muto's Tip bones
+	// (FTip/BTip/MTip/FeetTip, see MutoTopology.h's 2026-08-11 Bone/Child
+	// semantics correction): those are no longer their own ABA body (no
+	// muscle ever drives them independently), but their real mesh geometry
+	// still hangs past their parent (Feet/Hand)'s own joint origin, which
+	// ground-contact placement needs to know about — without this, a
+	// contact point placed (and ground-aligned) at Feet's own origin has no
+	// way to account for the fact that the visual foot/hand extends further
+	// out, and the unaccounted-for Tip geometry visibly pokes through the
+	// ground. Purely a placement hint for CreatureGroundContact.h; the
+	// solver itself never reads this.
+	TArray<FVector> BodyFusedTipOffset;
+
+	// Per-bone collision/contact radius, authored manually (see
+	// FMassMuscleDataMass::Radius) — a lightweight stand-in for real
+	// PhysicsAsset collision volumes, which can't be read from this module
+	// (Chaos/AVX2 conflict, see AgentSolver.Build.cs). Zero for every body
+	// unless a caller populates it (MutoTopology.h does, from MassAsset).
+	// Consumed by CreatureGroundContact.h to place ground-contact points at
+	// a bone's true visual surface instead of its joint origin.
+	TArray<float> BodyRadius;
+
+	// Per-bone capsule half-height (see FMassMuscleDataMass::
+	// CapsuleHalfHeight) — pulls the collision capsule's start cap back from
+	// BodyFusedTipOffset along the bone->tip axis. Zero (default) collapses
+	// the capsule down to the old single sphere-at-the-tip. Consumed by
+	// CreatureGroundContact.h alongside BodyRadius/BodyFusedTipOffset.
+	TArray<float> BodyCapsuleHalfHeight;
+
+	// Muscle strength-vs-angle curves, one entry per DOF (same flattened
+	// indexing as JointPos/JointTorque — DOFHasMuscleCurve[d]==false means no
+	// authored data for that DOF, and the solver treats it as multiplier 1,
+	// i.e. no behavior change for topologies that never populate these, like
+	// the synthetic test rigs). DOFRangeMinDeg/MaxDeg is the muscle's
+	// authored [MinRange,MaxRange] in degrees with MaxDeg already unwrapped
+	// to be > MinDeg (matching FMassMuscleViewportClient's arc-drawing
+	// convention for ranges that cross the 0/360 boundary) — the curves'
+	// own X axis is normalized 0-1 across that range, not raw degrees.
+	TArray<FRuntimeFloatCurve> DOFExtensionCurve;
+	TArray<FRuntimeFloatCurve> DOFFlexionCurve;
+	TArray<float> DOFRangeMinDeg;
+	TArray<float> DOFRangeMaxDeg;
+	TArray<uint8> DOFHasMuscleCurve;
 
     void Build(const TArray<int32> &InBodyParent, const TArray<int32> &InBodyDOFCount,
                const TArray<int32> &InBodyLimbIndex)
@@ -66,9 +126,19 @@ struct FCreatureTopology
 
 		BodyJointAxisLocal.Init(FVector::UpVector, NumBodies);
 		BodyJointOffsetInParent.SetNumZeroed(NumBodies);
+		BodyRestRotInParent.Init(FQuat::Identity, NumBodies);
 		BodyLocalCoMOffset.SetNumZeroed(NumBodies);
 		BodyMass.SetNumZeroed(NumBodies);
 		BodyInertiaDiagLocal.SetNumZeroed(NumBodies);
+		BodyFusedTipOffset.SetNumZeroed(NumBodies);
+		BodyRadius.SetNumZeroed(NumBodies);
+		BodyCapsuleHalfHeight.SetNumZeroed(NumBodies);
+
+		DOFExtensionCurve.SetNum(NumDOF);
+		DOFFlexionCurve.SetNum(NumDOF);
+		DOFRangeMinDeg.SetNumZeroed(NumDOF);
+		DOFRangeMaxDeg.SetNumZeroed(NumDOF);
+		DOFHasMuscleCurve.SetNumZeroed(NumDOF); // defaults false — multiplier 1 unless populated
 		// Caller fills these in per-body after Build() — Body 0 (root/torso)
 		// only needs BodyMass / BodyInertiaDiagLocal / BodyLocalCoMOffset;
 		// its joint fields are unused since it's solved as a floating base.
@@ -110,6 +180,15 @@ public:
         RotY.SetNumZeroed(BodySlots);
         RotZ.SetNumZeroed(BodySlots);
         RotW.Init(1.0f, BodySlots); // identity quaternion
+
+        // Ball joints only (BodyDOFCount[Body] == 3): persistent child-relative-to-parent
+        // orientation, integrated via exp-map each step (see CreatureBatchSolver.h). Left
+        // allocated-but-unused for revolute/root bodies — negligible memory, keeps addressing
+        // uniform via BodyIndex().
+        JointRelRotX.SetNumZeroed(BodySlots);
+        JointRelRotY.SetNumZeroed(BodySlots);
+        JointRelRotZ.SetNumZeroed(BodySlots);
+        JointRelRotW.Init(1.0f, BodySlots); // identity quaternion
 
         LinVelX.SetNumZeroed(BodySlots);
         LinVelY.SetNumZeroed(BodySlots);
@@ -168,6 +247,22 @@ public:
         RotW[Idx] = static_cast<float>(Q.W);
     }
 
+    /** Ball joints only — child orientation relative to parent. See JointRelRotX's comment in Init(). */
+    FORCEINLINE FQuat GetJointRelRot(int32 BodyIdx, int32 EnvIdx) const
+    {
+        const int32 Idx = BodyIndex(BodyIdx, EnvIdx);
+        return FQuat(JointRelRotX[Idx], JointRelRotY[Idx], JointRelRotZ[Idx], JointRelRotW[Idx]);
+    }
+
+    FORCEINLINE void SetJointRelRot(int32 BodyIdx, int32 EnvIdx, const FQuat &Q)
+    {
+        const int32 Idx = BodyIndex(BodyIdx, EnvIdx);
+        JointRelRotX[Idx] = static_cast<float>(Q.X);
+        JointRelRotY[Idx] = static_cast<float>(Q.Y);
+        JointRelRotZ[Idx] = static_cast<float>(Q.Z);
+        JointRelRotW[Idx] = static_cast<float>(Q.W);
+    }
+
     /**
      * Accumulate a world-space force at a world-space point on one body in
      * one env — e.g. a rocket impact or a hitscan shot. This does NOT touch
@@ -222,6 +317,8 @@ public:
     // Body-major, env-minor — scalar component arrays for SIMD-friendly access
     TArray<float> PosX, PosY, PosZ;
     TArray<float> RotX, RotY, RotZ, RotW;
+    // Ball joints only (Topology.BodyDOFCount[Body] == 3) — see JointRelRotX's comment in Init().
+    TArray<float> JointRelRotX, JointRelRotY, JointRelRotZ, JointRelRotW;
     TArray<float> LinVelX, LinVelY, LinVelZ;
     TArray<float> AngVelX, AngVelY, AngVelZ;
 

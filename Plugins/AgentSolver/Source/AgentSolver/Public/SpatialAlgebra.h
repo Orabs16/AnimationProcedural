@@ -116,6 +116,39 @@ struct FMat3
 	}
 };
 
+/**
+ * Closed-form 3x3 inverse via the cofactor/adjugate method — branch-free
+ * (no pivoting needed, unlike SolveSpatial6's 6x6 Gaussian elimination),
+ * which is exactly why it's usable directly in ball joints' SIMD reduction
+ * later, even though for now that path stays lane-scalar. Used on the
+ * composited angular-angular inertia block (Irot), which is symmetric
+ * positive-definite for any physically valid rigid-body composite, so a
+ * near-zero determinant shouldn't occur in practice; guarded anyway to
+ * match this file's defensive style.
+ */
+inline FMat3 Inverse3x3(const FMat3& M)
+{
+	const float C00 = M.M[1][1] * M.M[2][2] - M.M[1][2] * M.M[2][1];
+	const float C01 = M.M[1][2] * M.M[2][0] - M.M[1][0] * M.M[2][2];
+	const float C02 = M.M[1][0] * M.M[2][1] - M.M[1][1] * M.M[2][0];
+	const float C10 = M.M[0][2] * M.M[2][1] - M.M[0][1] * M.M[2][2];
+	const float C11 = M.M[0][0] * M.M[2][2] - M.M[0][2] * M.M[2][0];
+	const float C12 = M.M[0][1] * M.M[2][0] - M.M[0][0] * M.M[2][1];
+	const float C20 = M.M[0][1] * M.M[1][2] - M.M[0][2] * M.M[1][1];
+	const float C21 = M.M[0][2] * M.M[1][0] - M.M[0][0] * M.M[1][2];
+	const float C22 = M.M[0][0] * M.M[1][1] - M.M[0][1] * M.M[1][0];
+
+	const float Det = M.M[0][0] * C00 + M.M[0][1] * C01 + M.M[0][2] * C02;
+	const float InvDet = FMath::Abs(Det) > KINDA_SMALL_NUMBER ? 1.0f / Det : 0.0f;
+
+	// Adjugate is the cofactor matrix transposed; Inverse = Adjugate / Det.
+	FMat3 R;
+	R.M[0][0] = C00 * InvDet; R.M[0][1] = C10 * InvDet; R.M[0][2] = C20 * InvDet;
+	R.M[1][0] = C01 * InvDet; R.M[1][1] = C11 * InvDet; R.M[1][2] = C21 * InvDet;
+	R.M[2][0] = C02 * InvDet; R.M[2][1] = C12 * InvDet; R.M[2][2] = C22 * InvDet;
+	return R;
+}
+
 /** Spatial motion/force vector: angular part on top, linear part on bottom (Featherstone convention). */
 struct FSpatialVec
 {

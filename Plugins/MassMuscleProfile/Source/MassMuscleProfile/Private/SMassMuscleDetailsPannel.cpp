@@ -11,6 +11,7 @@
 #include "UMassMuscleProfileAsset.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SComboBox.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
 #include "Widgets/Input/SVectorInputBox.h"
 #include "Widgets/Layout/SBorder.h"
@@ -31,6 +32,7 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
     Model = InArgs._Model;
     Hierarchy = InArgs._Hierarchy;
 	Model->OnSelectionChanged.AddSP(this, &SMassMuscleDetailsPannel::OnSelectionChanged);
+	Model->OnMuscleDataChanged.AddSP(this, &SMassMuscleDetailsPannel::OnMuscleDataChanged);
 
     CurveProxy.Reset(NewObject<UMassMuscleCurveEditorProxy>(GetTransientPackage()));
 
@@ -93,10 +95,60 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                      SNew(SNumericEntryBox<float>)
                     .Value(this, &SMassMuscleDetailsPannel::GetBoneMass)
                     .OnValueChanged(this, &SMassMuscleDetailsPannel::OnMassChanged)
-                    .AllowSpin(true) 
+                    .AllowSpin(true)
                     .MinValue(0.0f)
                     .MaxValue(TOptional<float>())
                     .MaxSliderValue(TOptional<float>())
+                ]
+            ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SMassMuscleItemRow)
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(STextBlock).Text(FText::FromString("Capsule radius"))
+                ]
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(SNumericEntryBox<float>)
+                    .Value(this, &SMassMuscleDetailsPannel::GetBoneRadius)
+                    .OnValueChanged(this, &SMassMuscleDetailsPannel::OnRadiusChanged)
+                    .AllowSpin(true)
+                    .MinValue(0.0f)
+                    .MaxValue(TOptional<float>())
+                    .MaxSliderValue(TOptional<float>())
+                ]
+            ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SMassMuscleItemRow)
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(STextBlock).Text(FText::FromString("Capsule half height"))
+                ]
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(SNumericEntryBox<float>)
+                    .Value(this, &SMassMuscleDetailsPannel::GetCapsuleHalfHeight)
+                    .OnValueChanged(this, &SMassMuscleDetailsPannel::OnCapsuleHalfHeightChanged)
+                    .AllowSpin(true)
+                    .MinValue(0.0f)
+                    .MaxValue(TOptional<float>())
+                    .MaxSliderValue(TOptional<float>())
+                ]
+            ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SMassMuscleItemRow)
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(STextBlock).Text(FText::FromString("Can Touch Ground"))
+                ]
+                +SMassMuscleItemRow::Slot()
+                [
+                    SNew(SCheckBox)
+                    .IsChecked(this, &SMassMuscleDetailsPannel::GetCanTouchGround)
+                    .OnCheckStateChanged(this, &SMassMuscleDetailsPannel::OnCanTouchGroundChanged)
                 ]
             ]
         ]
@@ -130,7 +182,7 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                 ]
                 +SMassMuscleItemRow::Slot()
                 [
-                    SNew(STextBlock).Text_Lambda([this] () {return FText::FromName(SelectedMuscle->BoneName);})
+                    SNew(STextBlock).Text_Lambda([this] () {return FText::FromName(SelectedMuscle ? SelectedMuscle->BoneName : FName());})
                 ]
             ]
             +SMassMuscleExpandableSection::Slot()
@@ -143,14 +195,6 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                 +SMassMuscleItemRow::Slot()
                 [
                     MuscleComboBox.ToSharedRef()
-                ]
-            ]
-            +SMassMuscleExpandableSection::Slot()
-            [
-                SNew(SMassMuscleItemRow)
-                +SMassMuscleItemRow::Slot()
-                [
-                     SNew(STextBlock).Text(FText::FromString("Extension/Flexion Curves"))
                 ]
             ]
             +SMassMuscleExpandableSection::Slot()
@@ -193,6 +237,44 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                     .MaxValue(TOptional<float>())        // explicitly no max
                     .MinSliderValue(TOptional<float>())  // explicitly no slider min
                     .MaxSliderValue(TOptional<float>())  // explicitly no slider max
+                ]
+            ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SMassMuscleItemRow)
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(STextBlock).Text(FText::FromString("Extension strength"))
+                ]
+                +SMassMuscleItemRow::Slot()
+                [
+                    SNew(SNumericEntryBox<float>)
+                    .Value(this, &SMassMuscleDetailsPannel::GetExtensionStrength)
+                    .OnValueChanged(this, &SMassMuscleDetailsPannel::OnExtensionStrengthChanged)
+                    .AllowSpin(true)
+                    .MinValue(TOptional<float>())
+                    .MaxValue(TOptional<float>())
+                    .MinSliderValue(TOptional<float>())
+                    .MaxSliderValue(TOptional<float>())
+                ]
+            ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SMassMuscleItemRow)
+                +SMassMuscleItemRow::Slot()
+                [
+                     SNew(STextBlock).Text(FText::FromString("Flexion strength"))
+                ]
+                +SMassMuscleItemRow::Slot()
+                [
+                    SNew(SNumericEntryBox<float>)
+                    .Value(this, &SMassMuscleDetailsPannel::GetFlexionStrength)
+                    .OnValueChanged(this, &SMassMuscleDetailsPannel::OnFlexionStrengthChanged)
+                    .AllowSpin(true)
+                    .MinValue(TOptional<float>())
+                    .MaxValue(TOptional<float>())
+                    .MinSliderValue(TOptional<float>())
+                    .MaxSliderValue(TOptional<float>())
                 ]
             ]
             +SMassMuscleExpandableSection::Slot()
@@ -244,6 +326,22 @@ void SMassMuscleDetailsPannel::OnSelectionChanged(FName NewSelectionName, EItemT
     //else GetBoneInfo
 }
 
+void SMassMuscleDetailsPannel::OnMuscleDataChanged()
+{
+    // Delete/Mirror can reallocate or shift the owning TArray, which would
+    // leave SelectedMuscle/SelectedBone dangling since we only otherwise
+    // refresh them on an explicit selection change. Re-resolve (or clear,
+    // if the selected item no longer exists) against the current selection.
+    if (Model->GetSelectedType() == EItemType::Muscle)
+    {
+        GetMuscleInfo(Model->GetSelected());
+    }
+    else if (Model->GetSelectedType() == EItemType::Bone)
+    {
+        GetBoneInfo(Model->GetSelected());
+    }
+}
+
 void SMassMuscleDetailsPannel::GetMuscleInfo(FName MuscleName)
 {
     auto RotationTypeToString = [](ERotationType rotation){
@@ -259,8 +357,12 @@ void SMassMuscleDetailsPannel::GetMuscleInfo(FName MuscleName)
         }
     };
     UMassMuscleProfileAssetMuscle* profile =  Model->GetMuscleProfile();
-    int32 index = profile->FindMuscleByName(MuscleName);
-    if(index == INDEX_NONE) return;
+    const int32 index = profile ? profile->FindMuscleByName(MuscleName) : INDEX_NONE;
+    if(index == INDEX_NONE)
+    {
+        SelectedMuscle = nullptr;
+        return;
+    }
     SelectedMuscle = &profile->Muscles[index];
     TArray<FName> ChildBones;
     profile->GetChildBonesNames(SelectedMuscle->BoneName, ChildBones);
@@ -281,8 +383,12 @@ void SMassMuscleDetailsPannel::GetMuscleInfo(FName MuscleName)
 void SMassMuscleDetailsPannel::GetBoneInfo(FName boneName)
 {
     UMassMuscleProfileAssetMass* profile = Model->GetMassProfile();
-    int32 index = profile->FindBoneByName(boneName);
-    if(index == INDEX_NONE) return;
+    const int32 index = profile ? profile->FindBoneByName(boneName) : INDEX_NONE;
+    if(index == INDEX_NONE)
+    {
+        SelectedBone = nullptr;
+        return;
+    }
     SelectedBone = &profile->Mass[index];
 }
 
@@ -316,8 +422,8 @@ void SMassMuscleDetailsPannel::SyncCurveProxyFromSelectedMuscle()
     }
 
     bUpdatingCurveProxy = true;
-    CurveProxy->ExtensionStrength = SelectedMuscle->ExtensionStrength;
-    CurveProxy->FlexionStrength = SelectedMuscle->FlexionStrength;
+    CurveProxy->ExtensionStrengthCurve = SelectedMuscle->ExtensionStrengthCurve;
+    CurveProxy->FlexionStrengthCurve = SelectedMuscle->FlexionStrengthCurve;
     CurveDetailsView->SetObject(CurveProxy.Get());
     bUpdatingCurveProxy = false;
 }
@@ -329,8 +435,8 @@ void SMassMuscleDetailsPannel::ApplyCurveProxyToSelectedMuscle() const
         return;
     }
 
-    SelectedMuscle->ExtensionStrength = CurveProxy->ExtensionStrength;
-    SelectedMuscle->FlexionStrength = CurveProxy->FlexionStrength;
+    SelectedMuscle->ExtensionStrengthCurve = CurveProxy->ExtensionStrengthCurve;
+    SelectedMuscle->FlexionStrengthCurve = CurveProxy->FlexionStrengthCurve;
 }
 
 void SMassMuscleDetailsPannel::OnCurveDetailsChanged(const FPropertyChangedEvent& PropertyChangedEvent)

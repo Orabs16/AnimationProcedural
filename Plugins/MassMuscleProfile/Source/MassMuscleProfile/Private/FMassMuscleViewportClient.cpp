@@ -109,7 +109,13 @@ void FMassMuscleViewportClient::Draw(const FSceneView* View, FPrimitiveDrawInter
 	}
 	else
 	{
-		DrawSelectedBone(PDI, RefSkeleton);/*
+		DrawSelectedBone(PDI, RefSkeleton);
+		DrawBoneCapsule(PDI, RefSkeleton);
+		if (Settings->XRayCapsules)
+		{
+			DrawAllBoneCapsules(PDI, RefSkeleton, Model->GetMassProfile());
+		}
+		/*
 		UMassMuscleProfileAssetMuscle* profile = Model->GetMuscleProfile();
 		int32 BoneIndex = Model->GetSelectedBoneIndex();
 		if (profile && BoneIndex != INDEX_NONE)
@@ -148,6 +154,91 @@ void FMassMuscleViewportClient::DrawSelectedBone(FPrimitiveDrawInterface* PDI, c
 
 		PDI->DrawLine(BoneTransform.GetLocation(), ChildTransform.GetLocation(), FColor::Green, -1, 2.0f);
 	}
+}
+
+void FMassMuscleViewportClient::DrawBoneCapsule(FPrimitiveDrawInterface* PDI, const FReferenceSkeleton& RefSkeleton)
+{
+	if (!Model.IsValid() || Model->GetSelectedBoneIndex() == INDEX_NONE)
+		return;
+
+	UMassMuscleProfileAssetMass* MassProfile = Model->GetMassProfile();
+	if (!MassProfile)
+		return;
+
+	const int32 BoneIndex = Model->GetSelectedBoneIndex();
+	const FName BoneName = RefSkeleton.GetBoneName(BoneIndex);
+	const int32 MassIndex = MassProfile->FindBoneByName(BoneName);
+	if (MassIndex == INDEX_NONE)
+		return;
+
+	DrawSingleBoneCapsule(PDI, RefSkeleton, BoneIndex, MassProfile->Mass[MassIndex]);
+}
+
+void FMassMuscleViewportClient::DrawAllBoneCapsules(FPrimitiveDrawInterface* PDI, const FReferenceSkeleton& RefSkeleton, UMassMuscleProfileAssetMass* MassProfile)
+{
+	if (!MassProfile)
+		return;
+
+	for (const FMassMuscleDataMass& BoneMass : MassProfile->Mass)
+	{
+		const int32 BoneIndex = RefSkeleton.FindBoneIndex(BoneMass.BoneName);
+		if (BoneIndex == INDEX_NONE)
+			continue;
+
+		DrawSingleBoneCapsule(PDI, RefSkeleton, BoneIndex, BoneMass);
+	}
+}
+
+void FMassMuscleViewportClient::DrawSingleBoneCapsule(FPrimitiveDrawInterface* PDI, const FReferenceSkeleton& RefSkeleton, int32 BoneIndex, const FMassMuscleDataMass& BoneMass)
+{
+	if (BoneMass.Radius <= 0.0f)
+		return;
+
+	const FVector BonePos = PreviewMeshComponent->GetBoneTransform(BoneIndex).GetLocation();
+
+	// Tip = first direct child's joint position (matches AgentSolver's
+	// BodyFusedTipOffset convention — see CreatureGroundContact.h). Leaf
+	// bones (e.g. this rig's own unarticulated Tip bones) have no child to
+	// point toward, so extrapolate along the incoming parent->bone direction
+	// instead, just so a capsule still previews.
+	TArray<int32> Children;
+	RefSkeleton.GetDirectChildBones(BoneIndex, Children);
+	FVector TipPos;
+	if (Children.Num() > 0)
+	{
+		TipPos = PreviewMeshComponent->GetBoneTransform(Children[0]).GetLocation();
+	}
+	else
+	{
+		const int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
+		const FVector InDirection = ParentIndex != INDEX_NONE
+			? (BonePos - PreviewMeshComponent->GetBoneTransform(ParentIndex).GetLocation()).GetSafeNormal()
+			: FVector::UpVector;
+		TipPos = BonePos + InDirection * FMath::Max(BoneMass.Radius * 2.0f, 1.0f);
+	}
+
+	FVector Axis = (TipPos - BonePos).GetSafeNormal();
+	if (Axis.IsNearlyZero())
+	{
+		Axis = FVector::UpVector;
+	}
+
+	// End cap is fixed at the tip (matches the old sphere-at-tip behavior
+	// when CapsuleHalfHeight == 0); HalfHeight pulls the start cap back
+	// along the bone toward — and potentially past — its own origin.
+	const FVector EndCenter = TipPos;
+	const FVector StartCenter = TipPos - Axis * (BoneMass.CapsuleHalfHeight * 2.0f);
+	const FVector Center = (StartCenter + EndCenter) * 0.5f;
+	const float SegmentHalfLen = FVector::Dist(StartCenter, EndCenter) * 0.5f;
+
+	FVector XAxis = FVector::CrossProduct(Axis, FVector::UpVector).GetSafeNormal();
+	if (XAxis.IsNearlyZero())
+	{
+		XAxis = FVector::CrossProduct(Axis, FVector::ForwardVector).GetSafeNormal();
+	}
+	const FVector YAxis = FVector::CrossProduct(Axis, XAxis).GetSafeNormal();
+
+	DrawWireCapsule(PDI, Center, XAxis, YAxis, Axis, FMassMuscleStyle::MassCapsuleColor, BoneMass.Radius, SegmentHalfLen + BoneMass.Radius, 16, -1);
 }
 
 void FMassMuscleViewportClient::DrawSkeleton(FReferenceSkeleton RefSkeleton, FPrimitiveDrawInterface* PDI)
@@ -224,21 +315,20 @@ void FMassMuscleViewportClient::DrawSelectedArc(FPrimitiveDrawInterface* PDI, FM
 
 	FTransform BoneTM = PreviewMeshComponent->GetBoneTransform(BoneIndex);
 	FTransform ChildBoneTM = PreviewMeshComponent->GetBoneTransform(ChildBoneIndex);
-	bool isInverted = Muscle->Name.ToString().Right(2).ToUpper() == "_L";
 	ArcCenter = BoneTM.GetLocation();
 	switch (Muscle->Orientation) {
 		case ERotationType::Pitch:
-			ArcXAxis = BoneTM.GetUnitAxis(EAxis::X) * (isInverted?1.f:-1.f);
+			ArcXAxis = BoneTM.GetUnitAxis(EAxis::X);
 			ArcYAxis = BoneTM.GetUnitAxis(EAxis::Y);
 			break;
 
 		case ERotationType::Roll:
-			ArcXAxis = BoneTM.GetUnitAxis(EAxis::Z) * (isInverted?-1.f:1.f);
+			ArcXAxis = BoneTM.GetUnitAxis(EAxis::Z);
 			ArcYAxis = BoneTM.GetUnitAxis(EAxis::Y);
 			break;
 
 		case ERotationType::Yaw:
-			ArcXAxis = BoneTM.GetUnitAxis(EAxis::X) * (isInverted?1.f:-1.f);
+			ArcXAxis = BoneTM.GetUnitAxis(EAxis::X);
 			ArcYAxis = BoneTM.GetUnitAxis(EAxis::Z);
 			break;
 			

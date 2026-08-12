@@ -83,14 +83,14 @@ public:
         if(NewChildBoneNames.Num() == 0) return false;
         FName NewChildBoneName = NewChildBoneNames[0];
 
-        OutNewMuscle = FMassMuscleDataMuscle(
-            NewName,
-            NewBoneName,
-            NewChildBoneName,
-            ERotationType::Yaw,
-            -45.f,
-            45.f
-        );
+        OutNewMuscle = FMassMuscleDataMuscle();
+        OutNewMuscle.Name = NewName;
+        OutNewMuscle.BoneName = NewBoneName;
+        OutNewMuscle.ChildBoneName = NewChildBoneName;
+        OutNewMuscle.Orientation = ERotationType::Yaw;
+        OutNewMuscle.MinRange = -45.f;
+        OutNewMuscle.MaxRange = 45.f;
+        EnsureDefaultStrengthCurvesInitialized(OutNewMuscle);
         Muscles.Add(OutNewMuscle);
         MarkPackageDirty();   // tells UE the asset has unsaved changes
         return true;
