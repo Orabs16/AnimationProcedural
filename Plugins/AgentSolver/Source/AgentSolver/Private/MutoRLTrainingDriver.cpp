@@ -76,9 +76,42 @@ void UMutoRLTrainingEnvironment::GatherAgentCompletion_Implementation(ELearningA
 	// "ran out of runway" truncation case here, only max-episode-length,
 	// which the PPOTrainer/TrainingEnvironment already handle internally
 	// via MaxEpisodeStepNum).
-	OutCompletion = CreatureRLEnvironment::IsTerminated(Driver->Batch, EnvIndex, Driver->Config)
+	OutCompletion = CreatureRLEnvironment::IsTerminated(Driver->Batch, EnvIndex, Driver->Config,
+		&Driver->ContactStates, Driver->ContactPoints.Num(), Driver->Batch.GetNumEnvs())
 		? ELearningAgentsCompletion::Termination
 		: ELearningAgentsCompletion::Running;
+
+	// Diagnostic for the "Tried to add experience from episode that is still
+	// running..." assert (LearningExperience.cpp:401-402, FReplayBuffer::
+	// AddEpisodes) recurring in ProcessExperience. Traced the full engine
+	// call path (RunTraining -> GatherCompletions -> ProcessExperience ->
+	// EvaluateEndOfEpisodeCompletions -> SetAllCompletions ->
+	// SetResetInstancesFromCompletions -> GatherObservations -> AddEpisodes)
+	// and found no logical inconsistency: the same TrainingEnvironment::
+	// AllCompletions array is read to build the reset-instance set and then
+	// again inside AddEpisodes moments later, single-threaded, nothing in
+	// between but a pure observation gather. This function (our own
+	// ELearningAgentsCompletion source, feeding the "AgentCompletions" half
+	// of that Or()) is the only piece of the chain we can actually observe —
+	// logging every non-Running result (rare; episodes are normally long) so
+	// that if this recurs, the log tail shows exactly which AgentId/EnvIndex
+	// went non-Running and how many envs/agents existed at that moment,
+	// instead of just the bare assert.
+	// Thread id and owning-actor name are logged because these lines come out
+	// DOUBLED (same AgentId, same EnvIndex) in every crash log so far. The two
+	// candidate explanations produce different fingerprints here, which is the
+	// whole point of logging them:
+	//   - same actor name + DIFFERENT thread ids  -> two threads racing one
+	//     driver (see TrainingStepLock), the leading theory;
+	//   - DIFFERENT actor names                   -> two AMutoRLTrainingDriver
+	//     actors placed in the level, each stepping its own trainer with the
+	//     same ResetRandomSeed, so they terminate identically and merely LOOK
+	//     like one doubled stream.
+	if (OutCompletion != ELearningAgentsCompletion::Running)
+	{
+		UE_LOG(LogTemp, Log, TEXT("MutoRL: AgentId=%d EnvIndex=%d completion=Termination (NumEnvs=%d, actor=%s, thread=%u)"),
+			AgentId, EnvIndex, Driver->Batch.GetNumEnvs(), *Driver->GetName(), FPlatformTLS::GetCurrentThreadId());
+	}
 }
 
 void UMutoRLTrainingEnvironment::ResetAgentEpisode_Implementation(const int32 AgentId)
@@ -87,6 +120,12 @@ void UMutoRLTrainingEnvironment::ResetAgentEpisode_Implementation(const int32 Ag
 	check(Driver);
 	const int32 EnvIndex = Driver->GetEnvIndexForAgent(AgentId);
 	CreatureRLEnvironment::ResetEnv(Driver->Batch, EnvIndex, Driver->StandingTorsoPos, Driver->StandingTorsoRot, Driver->ResetStream, Driver->PosNoiseStdDev, Driver->AngleNoiseRad);
+	// ResetEnv only touches Batch -- ContactStates is a separate array this
+	// driver owns, and a non-finite NormalForce that triggered this reset
+	// would otherwise survive it untouched (see IsContactStateValid's
+	// comment). Per-env, so other envs sharing this same array are
+	// unaffected.
+	CreatureRLEnvironment::ClearContactStatesForEnv(Driver->ContactStates, Driver->ContactPoints.Num(), EnvIndex, Driver->Batch.GetNumEnvs());
 }
 
 // ================================ AMutoRLTrainingDriver ================================
@@ -96,10 +135,18 @@ AMutoRLTrainingDriver::AMutoRLTrainingDriver()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = false; // enabled once training actually starts (see StartTraining)
 
-	// Bumped from the engine default (10s) — the first handshake has to wait
-	// for the Python subprocess to import torch and friends, which can take
-	// a while on a cold start and can otherwise look identical to a hard failure.
-	SharedMemoryCommunicatorSettings.Timeout = 60.0f;
+	// See SharedMemoryCommunicatorSettings' comment for the full reasoning:
+	// this one value governs every trainer communication, including the
+	// ReceiveNetworks wait for a whole PPO iteration (measured at ~375s in a
+	// real run), and blowing it does not merely fail the step — it reaches
+	// RevertGameSettings() on the background training thread and hard-crashes
+	// the editor. 900s is chosen to comfortably clear the slowest observed
+	// iteration.
+	SharedMemoryCommunicatorSettings.Timeout = 900.0f;
+	// The socket path (bUseSocketCommunicator) has its own separate timeout
+	// that still sat at the engine's 10s default — flipping that switch would
+	// otherwise have made the crash above near-instant and constant.
+	SocketCommunicatorSettings.Timeout = 900.0f;
 
 	// Off by default in the plugin (FLearningAgentsPPOTrainingSettings::
 	// bUseGradNormMaxClipping = false) — turned on here because an
@@ -217,10 +264,18 @@ float AMutoRLTrainingDriver::ComputeDefaultStandingHeight(const FCreatureTopolog
 		// before CapsuleHalfHeight existed; skipping the tip once a capsule
 		// is long enough to have its start cap lower would be the same
 		// mistake in reverse).
-		const FVector LocalAxis = Point.LocalOffset.GetSafeNormal();
-		const FVector LocalStart = Point.LocalOffset - LocalAxis * (Point.CapsuleHalfHeight * 2.0f);
+		// Shared derivation — this used to inline `LocalOffset.GetSafeNormal()`,
+		// which returns the ZERO vector for an interior body's zero LocalOffset and
+		// therefore silently collapsed both caps onto the body origin regardless of
+		// the authored half height. Benign here (the two candidates were merely
+		// equal, so the max was still correct for the tip) but wrong for the same
+		// reason the ground gather was wrong, and it would have understated the
+		// required height for any body whose capsule reaches lower than its origin.
+		// See CreatureGroundContact::GetCapsuleLocalEnds.
+		FVector LocalTip, LocalStart;
+		CreatureGroundContact::GetCapsuleLocalEnds(Point.LocalOffset, Point.CapsuleHalfHeight, LocalTip, LocalStart);
 
-		const float WorldZOffsetAtTip = WorldZOffsetAtBodyOrigin + static_cast<float>(WorldRot.RotateVector(Point.LocalOffset).Z);
+		const float WorldZOffsetAtTip = WorldZOffsetAtBodyOrigin + static_cast<float>(WorldRot.RotateVector(LocalTip).Z);
 		const float WorldZOffsetAtStart = WorldZOffsetAtBodyOrigin + static_cast<float>(WorldRot.RotateVector(LocalStart).Z);
 
 		// The actual ground-touching surface is Point.Radius further down
@@ -264,15 +319,25 @@ void AMutoRLTrainingDriver::BeginPlay()
 void AMutoRLTrainingDriver::StartTraining()
 {
 #if WITH_EDITOR
-	if (Trainer)
+	// See bStartTrainingCalled's comment — this must be the very first check,
+	// before any setup work, and must be set to true before returning below,
+	// so a duplicate/re-entrant call is blocked no matter how far a prior
+	// call has progressed (a Trainer-based guard alone left a window where
+	// Manager/Interactor/Agents could already exist but Trainer did not yet).
+	if (bStartTrainingCalled)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::StartTraining: already started, ignoring."));
 		return;
 	}
+	bStartTrainingCalled = true;
 
 	if (!SkeletalMesh || !MassAsset || !MuscleAsset)
 	{
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::StartTraining: SkeletalMesh/MassAsset/MuscleAsset must all be assigned in the Details panel."));
+		// Nothing created yet (no Manager/agents) — safe to allow a retry
+		// once the missing asset is assigned, unlike the failure paths
+		// below this point.
+		bStartTrainingCalled = false;
 		return;
 	}
 
@@ -283,6 +348,8 @@ void AMutoRLTrainingDriver::StartTraining()
 	if (!MutoTopology::BuildMutoTopology(SkeletalMesh, MassAsset, MuscleAsset, Topo, Warnings, &BodyDebugNames))
 	{
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::StartTraining: BuildMutoTopology failed."));
+		// Still nothing created yet — same reasoning as above.
+		bStartTrainingCalled = false;
 		return;
 	}
 	for (const FString& Warning : Warnings)
@@ -290,12 +357,18 @@ void AMutoRLTrainingDriver::StartTraining()
 		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver: BuildMutoTopology warning: %s"), *Warning);
 	}
 
+	// Armature/damping are driver tuning knobs, not authored rig data — see
+	// ApplyPassiveJointDefaults. Must run BEFORE Batch.Init, which copies the
+	// topology by value.
+	ApplyPassiveJointDefaults(Topo);
+
 	Batch.Init(Topo, NumEnvs);
-	ContactPoints = CreatureGroundContact::BuildMutoContactPoints(Topo, MassAsset, BodyDebugNames);
+	ContactPoints = CreatureGroundContact::BuildMutoContactPoints(Topo, MassAsset, BodyDebugNames, bAllBodiesCollideWithGround, StructuralContactRadius);
 	if (ContactPoints.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::StartTraining: no ground-contact points derived — check MassProfile_Muto's CanTouchGround flags."));
 	}
+	LimbCollisionPairs = CreatureGroundContact::BuildMutoLimbCollisionPairs(Topo);
 	// Pre-size (all-untouching) so the very first GatherAgentObservation/
 	// GatherAgentReward — called by RunTraining()'s initial RunInference(),
 	// BEFORE Tick() ever reaches its own ApplyGroundContactForces call below
@@ -335,8 +408,39 @@ void AMutoRLTrainingDriver::StartTraining()
 
 	// ---- Wire up Learning Agents (see class comment: one headless driver, no per-env actors) ----
 	Manager = NewObject<ULearningAgentsManager>(this, TEXT("LAManager"));
-	Manager->SetMaxAgentNum(NumEnvs);
+	// ORDER IS LOAD-BEARING — RegisterComponent() BEFORE SetMaxAgentNum().
+	//
+	// Root cause of the long-running "Tried to add experience from episode
+	// that is still running..." crash (LearningExperience.cpp:401), found
+	// 2026-08-12 from a log showing "LAManager: Adding Agents [0 1 1 2 2 3 3
+	// 4 ... 128 127 127 126 126 125 125 124]" — duplicate AgentIds handed out
+	// by the very first AddAgents call.
+	//
+	// Both ULearningAgentsManager::OnRegister() (which RegisterComponent()
+	// triggers) and SetMaxAgentNum() seed the manager's VacantAgentIds/Agents
+	// pools, and SetMaxAgentNum's loop is deliberately INCREMENTAL:
+	//     for (AgentId = MaxAgentNum - 1; AgentId >= PreviousMaxAgentNum; ...)
+	// i.e. it only adds the NEWLY-widened range, because it assumes
+	// OnRegister() already seeded [0, PreviousMaxAgentNum). Calling it first
+	// (MaxAgentNum still at its default of 1) meant it seeded 255..1, and
+	// then OnRegister() seeded a SECOND, overlapping 255..0 on top — so the
+	// vacant-id pool contained duplicates and AddAgents could hand the same
+	// AgentId to two different agents.
+	//
+	// Every symptom followed from that one duplicate pool: our own
+	// GatherAgentCompletion logging each terminating agent twice, the
+	// engine's own "Resetting Agents [47 47 111 111]", and finally
+	// AddEpisodes seeing the same instance twice — the second visit finds the
+	// episode already consumed/reset and asserts. It was NOT concurrency (a
+	// re-entrancy detector never fired) and NOT a count mismatch (256 agents
+	// really were added — just not with 256 DISTINCT ids, which is exactly
+	// why an earlier Num()-only guard never caught it).
+	//
+	// Registering first lets OnRegister() seed from the default MaxAgentNum=1
+	// ([0]), after which SetMaxAgentNum(NumEnvs) appends 255..1 — together
+	// exactly one entry per id, 0..NumEnvs-1, no overlap.
 	Manager->RegisterComponent();
+	Manager->SetMaxAgentNum(NumEnvs);
 	ULearningAgentsManager* ManagerRaw = Manager;
 
 	ULearningAgentsInteractor* InteractorRaw = ULearningAgentsInteractor::MakeInteractor(ManagerRaw, UMutoRLInteractor::StaticClass());
@@ -371,6 +475,14 @@ void AMutoRLTrainingDriver::StartTraining()
 	{
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::StartTraining: failed to launch/connect to the Python training process (%s communicator) — is the engine's Python environment set up (PythonFoundationPackages)?"),
 			bUseSocketCommunicator ? TEXT("socket") : TEXT("shared memory"));
+		// Deliberately NOT resetting bStartTrainingCalled here: Manager/
+		// Interactor/Policy/Critic/TrainingEnvironment already exist at this
+		// point. Allowing a retry would build a second full set of those
+		// against the same actor and (if the first attempt's connection
+		// eventually completed asynchronously after this point returned)
+		// risks exactly the duplicate-agent-registration race this flag
+		// exists to prevent. A failed connection here means this actor
+		// instance needs a fresh PIE session / new actor, not a re-click.
 		return;
 	}
 
@@ -425,9 +537,89 @@ void AMutoRLTrainingDriver::StartTraining()
 
 bool AMutoRLTrainingDriver::RunOneTrainingStep()
 {
+	// See TrainingStepLock/ConcurrentStepDepth's comments. The depth counter
+	// is deliberately bumped BEFORE the lock is taken — taking the lock first
+	// would serialize the threads and hide the very thing being measured.
+	// Records the FIRST thread's id so a collision can name both sides.
+	static std::atomic<uint32> FirstStepThreadId{0};
+	const uint32 ThisThreadId = FPlatformTLS::GetCurrentThreadId();
+	uint32 ExpectedNoOwner = 0;
+	FirstStepThreadId.compare_exchange_strong(ExpectedNoOwner, ThisThreadId);
+
+	const int32 Depth = ConcurrentStepDepth.fetch_add(1, std::memory_order_acq_rel) + 1;
+	if (Depth > 1)
+	{
+		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver: CONCURRENT RunOneTrainingStep detected (depth=%d). This thread=%u, first-seen training thread=%u, game thread=%s. This is the cause of the duplicated agent callbacks and the AddEpisodes assert — see TrainingStepLock's comment."),
+			Depth, ThisThreadId, FirstStepThreadId.load(), IsInGameThread() ? TEXT("yes") : TEXT("no"));
+	}
+	ON_SCOPE_EXIT{ ConcurrentStepDepth.fetch_sub(1, std::memory_order_acq_rel); };
+
+	// Serializes the whole step so that even if a second thread does get in
+	// here, it waits rather than interleaving inside Learning Agents' shared
+	// scratch arrays (OnEventAgentIds/CompletionBuffer/ResetInstances) and
+	// corrupting the completion state AddEpisodes asserts on.
+	FScopeLock StepLock(&TrainingStepLock);
+
 	if (Trainer->HasTrainingFailed())
 	{
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver: training process failed — stopping. Check the training subprocess log."));
+		return false;
+	}
+
+	// Diagnostic for the "Tried to add experience from episode that is still
+	// running..." crash (LearningExperience.cpp:401-402). Traced it to
+	// Manager's own internal agent registry (OccupiedAgentIds, read via
+	// GetAllAgentIds()/GetAllAgentSet()) containing a duplicate AgentId — the
+	// crash log showed every terminating agent logged twice with identical
+	// AgentId+EnvIndex, and "LAManager: Resetting Agents [117 117]" is direct
+	// engine-side proof of the same duplicate. A prior fix (bStartTrainingCalled,
+	// closing a StartTraining() re-entrancy window) did NOT stop this from
+	// recurring, so the duplicate is being introduced some other way, still
+	// unknown. Since Manager->AddAgent(s) are the only two engine functions
+	// that ever grow OccupiedAgentIds, and we call AddAgents exactly once,
+	// this checks for the corruption BEFORE every RunTraining() call (not
+	// after — the crash logs show the duplicate already present across
+	// several preceding cycles before the one that actually asserts, so
+	// catching it here has a real chance of stopping training cleanly
+	// instead of running until the engine's own hard, unrecoverable assert
+	// eventually fires) and pinpoints exactly which step it first appears on.
+	// NOTE (2026-08-12): the ARRAY check below has never once fired across
+	// several crashes, which is what disproved the duplicate-registration
+	// theory. But the engine does NOT iterate that array in the hot path —
+	// ProcessExperience/GatherCompletions iterate Manager->GetAllAgentSet(),
+	// which returns an FIndexSet: either a slice (start+count) or a
+	// NON-OWNING TArrayView into OccupiedAgentIds' buffer (LearningArray.h).
+	// The two are separate objects that only agree if UpdateAgentSets() ran
+	// after the last mutation, so a stale/mismatched view is invisible to an
+	// array-only check while still doubling everything downstream. Checking
+	// BOTH, and checking them against each other, is what actually covers the
+	// observed symptom (every AgentId appearing exactly twice).
+	// Checks UNIQUENESS, not just count. The original version of this guard
+	// only compared Num() against NumEnvs and never fired even while the bug
+	// was actively corrupting every run — because 256 agents really were
+	// registered, just sharing ~129 distinct ids between them. Counting alone
+	// is blind to exactly the failure that actually happened (see the
+	// RegisterComponent/SetMaxAgentNum ordering comment in StartTraining).
+	const TArray<int32>& AgentIdArray = Manager->GetAllAgentIds();
+	TMap<int32, int32> IdCounts;
+	IdCounts.Reserve(AgentIdArray.Num());
+	for (const int32 Id : AgentIdArray)
+	{
+		IdCounts.FindOrAdd(Id)++;
+	}
+	if (AgentIdArray.Num() != NumEnvs || IdCounts.Num() != NumEnvs)
+	{
+		FString DupList;
+		for (const TPair<int32, int32>& Pair : IdCounts)
+		{
+			if (Pair.Value > 1)
+			{
+				DupList += FString::Printf(TEXT("%d(x%d) "), Pair.Key, Pair.Value);
+			}
+		}
+		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver: Manager agent registry corrupted — %d entries but only %d DISTINCT AgentIds, expected %d of each. Duplicates: %s. Stopping training and saving a snapshot instead of letting this reach the engine's unrecoverable AddEpisodes assert."),
+			AgentIdArray.Num(), IdCounts.Num(), NumEnvs, *DupList);
+		SaveTrainedNetworks();
 		return false;
 	}
 
@@ -475,6 +667,57 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 	return true;
 }
 
+void AMutoRLTrainingDriver::ApplyPassiveJointDefaults(FCreatureTopology& Topo) const
+{
+	for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
+	{
+		Topo.DOFArmatureRatio[DOF] = FMath::Max(0.0f, JointArmatureRatio);
+		Topo.DOFDampingTimeConstant[DOF] = FMath::Max(0.0f, JointDampingTimeConstant);
+	}
+}
+
+void AMutoRLTrainingDriver::BuildContactParams(
+	CreatureGroundContact::FImpulseContactParams& OutContact,
+	CreatureGroundContact::FJointLimitParams& OutLimits,
+	CreatureGroundContact::FLimbCollisionParams& OutLimbCollision) const
+{
+	OutContact.GroundZ = Config.GroundZ;
+	OutContact.ContactHertz = ContactHertz;
+	OutContact.DampingRatio = ContactDampingRatio;
+	OutContact.Slop = ContactSlop;
+	OutContact.FrictionCoefficient = ContactFrictionCoefficient;
+	OutContact.Iterations = ContactIterations;
+	OutContact.RelaxIterations = ContactRelaxIterations;
+	// Previously left at their struct defaults with no way to reach them from the
+	// editor -- Cfm and Relaxation in particular had no caller at all, so the two
+	// mechanisms written specifically for the coupled ground-row-vs-joint-limit-row
+	// instability had never once run.
+	OutContact.Cfm = ContactCfm;
+	OutContact.Relaxation = ContactRelaxation;
+	OutContact.MaxBiasVelocity = ContactMaxBiasVelocity;
+	OutContact.MaxNormalImpulse = ContactMaxNormalImpulse;
+	OutContact.bUseGlobalSolve = bUseGlobalConstraintSolve;
+	OutContact.GlobalIterations = GlobalSolverIterations;
+
+	OutLimits.bEnabled = bSolveJointLimitsAsConstraints;
+	OutLimits.Hertz = JointLimitHertz;
+	OutLimits.DampingRatio = JointLimitDampingRatio;
+	OutLimits.SlopDeg = JointLimitSlopDeg;
+	OutLimits.MarginDeg = JointLimitMarginDeg;
+	OutLimits.Cfm = JointLimitCfm;
+	OutLimits.Relaxation = JointLimitRelaxation;
+	OutLimits.MaxBiasVelocityDeg = JointLimitMaxBiasVelocityDeg;
+
+	OutLimbCollision.bEnabled = bEnableLimbCollision;
+	OutLimbCollision.Hertz = LimbCollisionHertz;
+	OutLimbCollision.DampingRatio = LimbCollisionDampingRatio;
+	OutLimbCollision.Slop = LimbCollisionSlop;
+	OutLimbCollision.FrictionCoefficient = LimbCollisionFrictionCoefficient;
+	OutLimbCollision.Cfm = LimbCollisionCfm;
+	OutLimbCollision.Relaxation = LimbCollisionRelaxation;
+	OutLimbCollision.MaxBiasVelocity = LimbCollisionMaxBiasVelocity;
+}
+
 void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 {
 	// Avoids a substep storm if TotalDt is ever unexpectedly large (e.g. a
@@ -486,12 +729,14 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 	const float ActualSubstepDt = ClampedTotalDt / NumSubsteps;
 
 	const int32 CurrentNumEnvs = Batch.GetNumEnvs();
-	CreatureGroundContact::FContactParams ContactParams;
-	ContactParams.GroundZ = Config.GroundZ;
-	ContactParams.SpringK = ContactSpringK;
-	ContactParams.DamperK = ContactDamperK;
-	ContactParams.FrictionK = ContactFrictionK;
-	ContactParams.FrictionCoefficient = ContactFrictionCoefficient;
+
+	CreatureGroundContact::FImpulseContactParams ContactParams;
+	CreatureGroundContact::FJointLimitParams LimitParams;
+	CreatureGroundContact::FLimbCollisionParams LimbCollisionParams;
+	BuildContactParams(ContactParams, LimitParams, LimbCollisionParams);
+
+	const bool bWantResidualLog = LogSolverResidualEverySubsteps > 0 && bUseGlobalConstraintSolve;
+	const bool bWantWatchLog = WatchContactBody != INDEX_NONE || WatchJointLimitDOF != INDEX_NONE;
 
 	for (int32 Substep = 0; Substep < NumSubsteps; ++Substep)
 	{
@@ -499,8 +744,56 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		{
 			Batch.ClearExternalForces(Env);
 		}
-		CreatureGroundContact::ApplyGroundContactForces(Batch, Batch.GetTopology(), ContactPoints, ContactParams, &ContactStates);
+
+		// Contact is resolved AFTER integration: an impulse corrects the
+		// velocities Step() just produced. (The removed penalty model had to run
+		// BEFORE, since it staged a force for the bias pass to pick up — the two
+		// sat on opposite sides of Step(), which was a standing source of
+		// confusion and one reason for dropping it.)
+		//
+		// Resolving inside this loop means contact is solved once per SUBSTEP.
 		Solver.Step(Batch, ActualSubstepDt, Gravity);
+
+		// Passive joint damping, BEFORE contact so contact solves against the
+		// damped velocities rather than fighting them. It is a velocity-level
+		// impulse (see FCreatureABASolver::ApplyJointDamping — the torque form was
+		// tried and measurably reverses joints), so it belongs on this side of
+		// Step() alongside contact, not inside the force pass. Returns immediately
+		// when no joint has a damping time constant.
+		Solver.ApplyJointDamping(Batch, ActualSubstepDt);
+
+		// Weld set for the factorization, rebuilt every substep because which
+		// joints are saturated is per-substep, per-env state. Built BEFORE
+		// ResolveGroundContactImpulses because that is what calls
+		// ComputeArticulatedInertias.
+		const uint8* Locks = nullptr;
+		int32 LockStride = 0;
+		if (bWeldSaturatedJoints)
+		{
+			Solver.BuildSaturatedJointLocks(Batch, WeldSaturationMarginDeg, SaturatedJointLocks);
+			Locks = SaturatedJointLocks.GetData();
+			LockStride = CurrentNumEnvs;
+		}
+
+		const bool bLogThisSubstep = bWantResidualLog && (Substep % LogSolverResidualEverySubsteps == 0);
+		CreatureGroundContact::FIterationDebugLog DebugLog;
+		DebugLog.WatchBody = WatchContactBody;
+		DebugLog.WatchDOF = WatchJointLimitDOF;
+
+		CreatureGroundContact::ResolveGroundContactImpulses(
+			Batch, Batch.GetTopology(), ContactPoints, ContactParams,
+			Solver, ActualSubstepDt, ContactImpulseCache, &ContactStates, &LimitParams,
+			LimbCollisionPairs, &LimbCollisionParams,
+			(bLogThisSubstep || bWantWatchLog) ? &DebugLog : nullptr,
+			Locks, LockStride);
+
+		if (bLogThisSubstep && DebugLog.GlobalResidualPerIteration.Num() > 0)
+		{
+			const TArray<float>& R = DebugLog.GlobalResidualPerIteration;
+			UE_LOG(LogTemp, Log, TEXT("MutoRL solver: rows=%d  residual first=%.4g  mid=%.4g  last=%.4g  (%d sweeps)"),
+				DebugLog.GlobalNumRows, R[0], R[R.Num() / 2], R.Last(), R.Num());
+		}
+
 		if (MaxJointSpeedDegPerSec > 0.0f)
 		{
 			Solver.ClampJointSpeed(Batch, FMath::DegreesToRadians(MaxJointSpeedDegPerSec));
@@ -508,6 +801,43 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 	}
 }
 
+// KNOWN STRUCTURAL HAZARD (2026-08-12) — read before touching this loop.
+//
+// ULearningAgentsPPOTrainer has THREE internal paths that end training, and
+// every one of them calls UE::Learning::Agents::RevertGameSettings()
+// (LearningAgentsTrainer.cpp:126), which unconditionally calls
+// UGameUserSettings::ApplySettings(), which unconditionally constructs an
+// FGlobalComponentRecreateRenderStateContext (GameUserSettings.cpp:526) ->
+// FlushRenderingCommands() -> check(IsInGameThread()). Running any of those
+// from this background thread is therefore a guaranteed editor crash:
+//
+//   1. ReceiveNetworks timeout   -> bHasTrainingFailed = true; EndTraining()
+//   2. SendReplayBuffer failure  -> bHasTrainingFailed = true; EndTraining()
+//   3. Trainer reports Completed -> DoneTraining()
+//
+// This is not fixable from our side: RevertGameSettings is reached from
+// inside Trainer->RunTraining(), so there is no interception point, and no
+// combination of FLearningAgentsTrainingGameSettings flags can disable it
+// (the apply side is flag-gated, the revert side is not). Confirmed by
+// reading the engine source, after a real run crashed via path 1.
+//
+// What keeps this from firing in practice:
+//   - Path 1 is the one that actually bit us; the communicator Timeout is now
+//     900s (see SharedMemoryCommunicatorSettings) so a slow-but-healthy PPO
+//     iteration no longer trips it.
+//   - Path 3 needs TrainingSettings.NumberOfIterations (default 1,000,000)
+//     to be exhausted, which no realistic run reaches. Do NOT lower it to a
+//     small value expecting a clean finish — that converts normal completion
+//     into a crash. Stop training via EndPlay instead, which calls
+//     EndTraining() from the game thread, where it is safe (and which is
+//     already the case).
+//   - Path 2 remains an unmitigated risk, but only fires on a hard
+//     shared-memory/socket write failure.
+//
+// The only complete fix is to call Trainer->RunTraining() from the game
+// thread (the plugin's intended usage — its own samples drive it from Tick).
+// That was rejected here because a PPO iteration blocks for minutes and would
+// freeze the whole editor for that long, which is why this loop exists at all.
 void AMutoRLTrainingDriver::RunTrainingThreadLoop()
 {
 	while (!bStopTrainingThreadRequested.load(std::memory_order_relaxed))

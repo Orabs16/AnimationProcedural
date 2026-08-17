@@ -55,9 +55,19 @@ void AMutoRLVisualizerActor::StartTraining()
 		UE_LOG(LogTemp, Warning, TEXT("AMutoRLVisualizerActor: BuildMutoTopology warning: %s"), *Warning);
 	}
 
+	// See AMutoRLTrainingDriver::ApplyPassiveJointDefaults — must precede
+	// Batch.Init, which copies the topology by value.
+	ApplyPassiveJointDefaults(Topo);
+
 	Batch.Init(Topo, 1);
-	ContactPoints = CreatureGroundContact::BuildMutoContactPoints(Topo, MassAsset, BodyDebugNames);
+	ContactPoints = CreatureGroundContact::BuildMutoContactPoints(Topo, MassAsset, BodyDebugNames, bAllBodiesCollideWithGround, StructuralContactRadius);
 	ContactStates.SetNumZeroed(ContactPoints.Num()); // 1 env — see AMutoRLTrainingDriver's own StartTraining for why this must be pre-sized
+	// This override replaces AMutoRLTrainingDriver::StartTraining() entirely
+	// rather than calling Super, so LimbCollisionPairs (built there) was never
+	// populated here -- bEnableLimbCollision silently did nothing regardless
+	// of its value, since StepPhysicsSubstepped's LimbPairs.Num()==0 always
+	// short-circuits ResolveGroundContactImpulses' pair gather.
+	LimbCollisionPairs = CreatureGroundContact::BuildMutoLimbCollisionPairs(Topo);
 
 	// See AMutoRLTrainingDriver::StartTraining's identical line — Pelvis's
 	// own bind-pose rotation isn't necessarily world-identity. Computed
@@ -90,8 +100,15 @@ void AMutoRLVisualizerActor::StartTraining()
 	// new ones) network objects — NOT SourceTrainingDriver's live ones, see
 	// class comment for why — populated below via RefreshNetworkSnapshot.
 	Manager = NewObject<ULearningAgentsManager>(this, TEXT("VizManager"));
-	Manager->SetMaxAgentNum(1);
+	// RegisterComponent() BEFORE SetMaxAgentNum() — see the long comment on
+	// the identical pair in AMutoRLTrainingDriver::StartTraining for why this
+	// order matters (double-seeded vacant-id pool -> duplicate AgentIds).
+	// This actor happened to be immune (MaxAgentNum's default is already 1,
+	// so SetMaxAgentNum(1) seeds nothing either way), but leaving the wrong
+	// order here would be a trap the moment anyone runs the visualizer with
+	// more than one agent.
 	Manager->RegisterComponent();
+	Manager->SetMaxAgentNum(1);
 	ULearningAgentsManager* ManagerRaw = Manager;
 
 	ULearningAgentsInteractor* InteractorRaw = ULearningAgentsInteractor::MakeInteractor(ManagerRaw, UMutoRLInteractor::StaticClass());
@@ -165,9 +182,19 @@ void AMutoRLVisualizerActor::Tick(float DeltaTime)
 	// Falls over -> stand back up, so a live demo doesn't just end up in a
 	// heap on the ground; not part of training (this policy is never
 	// updated from here), purely a display convenience.
-	if (CreatureRLEnvironment::IsTerminated(Batch, 0, Config))
+	//
+	// Passing ContactStates here is not optional in practice: a non-finite
+	// ContactPointState::NormalForce from the LAST substep above is not
+	// covered by IsBodyStateValid at all (ContactStates isn't part of
+	// Batch), and ResetEnv doesn't touch it either -- without this, exactly
+	// that value would survive untouched into the observation
+	// RunInference() reads at the START of the NEXT Tick(), crashing on
+	// Learning Agents' hard non-finite assert (confirmed in practice,
+	// 2026-08-16).
+	if (CreatureRLEnvironment::IsTerminated(Batch, 0, Config, &ContactStates, ContactPoints.Num(), Batch.GetNumEnvs()))
 	{
 		CreatureRLEnvironment::ResetEnv(Batch, 0, StandingTorsoPos, StandingTorsoRot, ResetStream, PosNoiseStdDev, AngleNoiseRad);
+		CreatureRLEnvironment::ClearContactStatesForEnv(ContactStates, ContactPoints.Num(), 0, Batch.GetNumEnvs());
 	}
 
 	UpdateMeshPose();

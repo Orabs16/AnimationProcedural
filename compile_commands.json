@@ -1,26 +1,26 @@
-[
+﻿[
 	{
 		"file": "T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/Module.AnimationProcedural.gen.cpp",
 		"command": "\"C:/Program Files/LLVM/bin/clang-cl.exe\" @\"T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/Module.AnimationProcedural.gen.cpp.obj.rsp\" ",
-		"directory": "C:/Program Files/Epic Games/UE_5.6/Engine/Source",
+		"directory": "T:/UnrealEngine/UE_5.6/Engine/Source",
 		"output": "T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/Module.AnimationProcedural.gen.cpp.obj"
 	},
 	{
 		"file": "T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/PerModuleInline.gen.cpp",
 		"command": "\"C:/Program Files/LLVM/bin/clang-cl.exe\" @\"T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/PerModuleInline.gen.cpp.obj.rsp\" ",
-		"directory": "C:/Program Files/Epic Games/UE_5.6/Engine/Source",
+		"directory": "T:/UnrealEngine/UE_5.6/Engine/Source",
 		"output": "T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/PerModuleInline.gen.cpp.obj"
 	},
 	{
 		"file": "T:/GIT/AnimationProcedural/Source/AnimationProcedural/AnimationProcedural.cpp",
 		"command": "\"C:/Program Files/LLVM/bin/clang-cl.exe\" @\"T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/AnimationProcedural.cpp.obj.rsp\" ",
-		"directory": "C:/Program Files/Epic Games/UE_5.6/Engine/Source",
+		"directory": "T:/UnrealEngine/UE_5.6/Engine/Source",
 		"output": "T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/AnimationProcedural.cpp.obj"
 	},
 	{
 		"file": "T:/GIT/AnimationProcedural/Source/AnimationProcedural/FRigUnit_TestCustomNode.cpp",
 		"command": "\"C:/Program Files/LLVM/bin/clang-cl.exe\" @\"T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/FRigUnit_TestCustomNode.cpp.obj.rsp\" ",
-		"directory": "C:/Program Files/Epic Games/UE_5.6/Engine/Source",
+		"directory": "T:/UnrealEngine/UE_5.6/Engine/Source",
 		"output": "T:/GIT/AnimationProcedural/Intermediate/Build/Win64/x64/UnrealEditor/Development/AnimationProcedural/FRigUnit_TestCustomNode.cpp.obj"
 	}
 ]

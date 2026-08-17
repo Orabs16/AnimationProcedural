@@ -105,9 +105,14 @@ bool FCreatureRLEnvironmentTest::RunTest(const FString& Parameters)
 	Solver.Step(Batch, 1.0f / 240.0f); // run one step so body 1/2 world positions are populated from the topology's joint offsets
 
 	TArray<FContactPointState> ContactStates;
-	FContactParams ContactParams;
+	FImpulseContactParams ContactParams;
 	ContactParams.GroundZ = Config.GroundZ;
-	ApplyGroundContactForces(Batch, Topo, ContactPoints, ContactParams, &ContactStates);
+	FImpulseContactCache ContactCache;
+	// This test only needs ContactStates populated so the observation and reward
+	// helpers have touching/force data to read; the contact model itself is not
+	// under test here.
+	ResolveGroundContactImpulses(Batch, Topo, ContactPoints, ContactParams, Solver,
+		1.0f / 240.0f, ContactCache, &ContactStates);
 
 	TArray<float> Observation;
 	ComputeObservations(Batch, 0, Config, ContactPoints, ContactStates, NumEnvs, Observation);

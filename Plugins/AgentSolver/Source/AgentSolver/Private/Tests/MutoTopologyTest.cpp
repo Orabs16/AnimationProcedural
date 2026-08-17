@@ -38,10 +38,15 @@ bool FMutoTopologyTest::RunTest(const FString& Parameters)
 	}
 	if (!TestTrue(TEXT("BuildMutoTopology succeeded"), bBuilt)) return false;
 
-	// 1 torso + 8 limbs x (5 F-shaped + 5 B-shaped + 3 M-shaped + 4 Hips-shaped)/4 limb-types,
-	// i.e. (5+5+3+4) joint bones x 2 sides = 34, plus the torso.
-	const int32 ExpectedBodies = 1 + (5 + 5 + 3 + 4) * 2;
-	const int32 ExpectedDOF = (7 + 7 + 5 + 6) * 2; // per limb: 3 (ball) + (chain length - 1) x 1 (yaw)
+	// 1 Pelvis + 6 spine/head/jaw bodies (2026-08-16: independently articulated,
+	// each a 3-DOF ball -- Back1-3, Head1-2, LowerMouth. UpperMouth and Chin
+	// are leaves with no muscle of their own, same as a limb's Tip bone --
+	// GetMutoTorsoLeafBones -- so they get no ABA body, just fused rigidly
+	// into their real parent) + 8 limbs x (5 F-shaped + 5 B-shaped + 3
+	// M-shaped + 4 Hips-shaped)/4 limb-types, i.e. (5+5+3+4) joint bones x 2
+	// sides = 34.
+	const int32 ExpectedBodies = 1 + 6 + (5 + 5 + 3 + 4) * 2;
+	const int32 ExpectedDOF = 6 * 3 + (7 + 7 + 5 + 6) * 2; // spine: 6 x 3-DOF ball; per limb: 3 (ball) + (chain length - 1) x 1 (yaw)
 	TestEqual(TEXT("NumBodies"), Topo.NumBodies, ExpectedBodies);
 	TestEqual(TEXT("NumDOF"), Topo.NumDOF, ExpectedDOF);
 	TestEqual(TEXT("NumLimbs"), Topo.NumLimbs, 8);
@@ -76,7 +81,7 @@ bool FMutoTopologyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("All bodies have positive mass/inertia"), bMassInertiaValid);
 
 	// End-to-end smoke test: step the full topology under gravity alone and
-	// check for NaN/Inf. This is a much larger/more irregular tree (35 bodies,
+	// check for NaN/Inf. This is a much larger/more irregular tree (43 bodies,
 	// mixed ball+revolute, real non-uniform offsets) than the synthetic
 	// topology CreatureBatchSolverSIMDTest.cpp exercises.
 	FCreatureBatchState Batch;

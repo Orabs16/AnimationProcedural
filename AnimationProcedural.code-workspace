@@ -6,16 +6,16 @@
 		},
 		{
 			"name": "UE5",
-			"path": "C:\\Program Files\\Epic Games\\UE_5.6"
+			"path": "T:\\UnrealEngine\\UE_5.6"
 		}
 	],
 	"settings": {
 		"typescript.tsc.autoDetect": "off",
 		"npm.autoDetect": "off",
 		"terminal.integrated.env.windows": {
-			"PATH": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64;${env:PATH}",
-			"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64",
-			"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64\\dotnet.exe",
+			"PATH": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64;${env:PATH}",
+			"DOTNET_ROOT": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64",
+			"DOTNET_HOST_PATH": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64\\dotnet.exe",
 			"DOTNET_MULTILEVEL_LOOKUP": "0",
 			"DOTNET_ROLL_FORWARD": "LatestMajor"
 		},
@@ -40,14 +40,6 @@
 		"workbench.colorCustomizations": {
 			"editorInlayHint.foreground": "#a2a2a2c0",
 			"editorInlayHint.background": "#00000000"
-		},
-		"editor.semanticTokenColorCustomizations": {
-			"enabled": true,
-			"rules": {
-				"variable": "#d68306",
-				"parameter": "#d68306",
-				"property": "#d68306"
-			}
 		},
 		"editor.suggestFontSize": 0
 	},
@@ -74,7 +66,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -94,7 +86,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -111,7 +103,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -128,7 +120,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -148,7 +140,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -165,7 +157,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -182,7 +174,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -202,7 +194,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -219,7 +211,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -236,7 +228,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -256,7 +248,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -273,7 +265,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -290,7 +282,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -310,7 +302,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -327,7 +319,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -344,7 +336,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -364,7 +356,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -381,7 +373,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -398,7 +390,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -418,7 +410,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -435,7 +427,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -452,7 +444,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -472,7 +464,7 @@
 				],
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -489,7 +481,7 @@
 				"problemMatcher": "$msCompile",
 				"type": "shell",
 				"options": {
-					"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"cwd": "T:\\UnrealEngine\\UE_5.6"
 				}
 			}
 		]
@@ -502,16 +494,17 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-Debug.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Debug Build",
-				"args": [],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"args": [
+				],
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -519,16 +512,17 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-DebugGame.exe",
 				"preLaunchTask": "AnimationProcedural Win64 DebugGame Build",
-				"args": [],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"args": [
+				],
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -536,16 +530,17 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Development Build",
-				"args": [],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"args": [
+				],
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -553,16 +548,17 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-Test.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Test Build",
-				"args": [],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"args": [
+				],
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -570,73 +566,74 @@
 				"request": "launch",
 				"program": "T:\\GIT\\AnimationProcedural\\Binaries\\Win64\\UnrealGame-Win64-Shipping.exe",
 				"preLaunchTask": "AnimationProcedural Win64 Shipping Build",
-				"args": [],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"args": [
+				],
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
 				"name": "Launch AnimationProceduralEditor (Debug)",
 				"request": "launch",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-Debug.exe",
+				"program": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-Debug.exe",
 				"preLaunchTask": "AnimationProceduralEditor Win64 Debug Build",
 				"args": [
 					"T:\\GIT\\AnimationProcedural\\AnimationProcedural.uproject"
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
 				"name": "Launch AnimationProceduralEditor (DebugGame)",
 				"request": "launch",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-DebugGame.exe",
+				"program": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\Win64\\UnrealEditor-Win64-DebugGame.exe",
 				"preLaunchTask": "AnimationProceduralEditor Win64 DebugGame Build",
 				"args": [
 					"T:\\GIT\\AnimationProcedural\\AnimationProcedural.uproject"
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
 				"name": "Launch AnimationProceduralEditor (Development)",
 				"request": "launch",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\Win64\\UnrealEditor.exe",
+				"program": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\Win64\\UnrealEditor.exe",
 				"preLaunchTask": "AnimationProceduralEditor Win64 Development Build",
 				"args": [
 					"T:\\GIT\\AnimationProcedural\\AnimationProcedural.uproject"
 				],
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6",
+				"cwd": "T:\\UnrealEngine\\UE_5.6",
 				"stopAtEntry": false,
 				"console": "integratedTerminal",
 				"type": "cppvsdbg",
-				"visualizerFile": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
+				"visualizerFile": "T:\\UnrealEngine\\UE_5.6\\Engine\\Extras\\VisualStudioDebugging\\Unreal.natvis",
 				"sourceFileMap": {
-					"D:\\build\\++UE5\\Sync": "C:\\Program Files\\Epic Games\\UE_5.6",
+					"D:\\build\\++UE5\\Sync": "T:\\UnrealEngine\\UE_5.6",
 					"Z:\\UEVFS\\AnimationProcedural": "T:\\GIT\\AnimationProcedural",
-					"Z:\\UEVFS\\Root": "C:\\Program Files\\Epic Games\\UE_5.6"
+					"Z:\\UEVFS\\Root": "T:\\UnrealEngine\\UE_5.6"
 				}
 			},
 			{
@@ -644,7 +641,7 @@
 				"type": "coreclr",
 				"request": "launch",
 				"preLaunchTask": "UnrealBuildTool Win64 Development Build",
-				"program": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Build\\BatchFiles\\RunUBT.bat",
+				"program": "T:\\UnrealEngine\\UE_5.6\\Engine\\Build\\BatchFiles\\RunUBT.bat",
 				"args": [
 					"-projectfiles",
 					"-vscode",
@@ -654,15 +651,15 @@
 					"-dotnet"
 				],
 				"env": {
-					"PATH": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64;${env:PATH}",
-					"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64",
-					"DOTNET_HOST_PATH": "C:\\Program Files\\Epic Games\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64\\dotnet.exe",
+					"PATH": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64;${env:PATH}",
+					"DOTNET_ROOT": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64",
+					"DOTNET_HOST_PATH": "T:\\UnrealEngine\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64\\dotnet.exe",
 					"DOTNET_MULTILEVEL_LOOKUP": "0",
 					"DOTNET_ROLL_FORWARD": "LatestMajor"
 				},
 				"console": "integratedTerminal",
 				"stopAtEntry": false,
-				"cwd": "C:\\Program Files\\Epic Games\\UE_5.6"
+				"cwd": "T:\\UnrealEngine\\UE_5.6"
 			}
 		]
 	}

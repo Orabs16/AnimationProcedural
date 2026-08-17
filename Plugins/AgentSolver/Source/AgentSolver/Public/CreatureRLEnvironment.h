@@ -67,7 +67,19 @@ namespace CreatureRLEnvironment
 		// headroom above that but nowhere near the physically-nonsensical
 		// values a torque limit tuned for real (much heavier) creature mass
 		// would imply.
-		float MaxTorquePerDOF = 5.0f;
+		// RESCALED 2026-08-13. The old 5.0 was chosen when every body was a 1.0 kg
+		// placeholder, and the reasoning above is now obsolete: with the authored
+		// masses the single worst body (BElbow1_L) needs tau = 3.44e7 just to hold
+		// ITSELF against gravity, so 5.0 was ~6.9 MILLION times too weak — the
+		// creature had, in effect, no muscles at all and could only ever collapse.
+		// 5e7 gives ~1.5x margin over that worst holding torque.
+		//
+		// This is a torque LIMIT, not a commanded torque: the policy emits [-1,1]
+		// and the muscle curves scale it, so a larger limit widens the reachable
+		// range rather than making the creature thrash. The reward's torque
+		// penalty is normalized by this same value, so its meaning is unchanged.
+		// See SOLVER_DEBUG_LOG.md entry 017.
+		float MaxTorquePerDOF = 5.0e7f;
 
 		// "Fallen over" termination thresholds.
 		float MinUprightDot = 0.5f;    // dot(TorsoUp, WorldUp) below this ends the episode
@@ -176,8 +188,26 @@ namespace CreatureRLEnvironment
 			if (State.bTouching)
 			{
 				const FContactPointDef& Point = ContactPoints[PointIdx];
-				const FQuat BodyRot = Batch.GetBodyRot(Point.BodyIndex, Env);
-				const FVector WorldPoint = Batch.GetBodyPos(Point.BodyIndex, Env) + BodyRot.RotateVector(Point.LocalOffset);
+				// Use the SAME world-surface derivation the contact solver used to
+				// produce State.NormalForce, rather than re-deriving it here.
+				// This used to be `BodyPos + BodyRot.RotateVector(Point.LocalOffset)`
+				// with no radius offset and no capsule-end handling — so for every
+				// STRUCTURAL point (LocalOffset == ZeroVector, and there are 25 of
+				// those against 10 authored ones once bAllBodiesCollideWithGround is
+				// on) the centre of pressure was placed at the body's JOINT ORIGIN
+				// instead of anywhere near the ground it was pressing on. The balance
+				// term is the second-largest positive term in this reward, so that
+				// mis-placement was shaping the policy directly.
+				//
+				// Averaging the two capsule ends is the honest reduction of a capsule
+				// to one point: FContactPointState aggregates both ends' impulses into
+				// a single per-point force (see ResolveGroundContactImpulses' OutState
+				// accumulation, which does `+=` across ends), so the position paired
+				// with that force should be the midpoint of the ends that generated it.
+				FVector Surfaces[2];
+				const int32 NumEnds = CreatureGroundContact::GetContactPointWorldSurfaces(
+					Batch, Point, Env, FVector::UpVector, Surfaces);
+				const FVector WorldPoint = (NumEnds == 2) ? (Surfaces[0] + Surfaces[1]) * 0.5f : Surfaces[0];
 				WeightedContactSum += WorldPoint * State.NormalForce;
 				TotalForce += State.NormalForce;
 			}
@@ -302,10 +332,78 @@ namespace CreatureRLEnvironment
 		return true;
 	}
 
-	/** True once the creature has fallen over (too tilted or too low) or its state has numerically blown up — caller resets the env when this is true. */
-	inline bool IsTerminated(const FCreatureBatchState& Batch, int32 Env, const FEnvConfig& Config)
+	/**
+	 * True iff every ContactPointState::NormalForce for this env is finite.
+	 * NOT covered by IsBodyStateValid (that checks Batch only -- ContactStates
+	 * is a separate array the caller owns, populated by
+	 * CreatureGroundContact::ResolveGroundContactImpulses). Needed for the
+	 * exact same reason IsBodyStateValid checks the DOF arrays separately
+	 * from the body arrays (see that function's comment): a value written
+	 * during the LAST substep of a StepPhysicsSubstepped() call can be
+	 * non-finite even when the body/DOF state that same substep produced is
+	 * itself still finite (or gets caught and reset before the NEXT read),
+	 * because nothing between "ResolveGroundContactImpulses writes
+	 * ContactStates" and "the next tick's RunInference reads it" ever
+	 * revisits that array -- ResetEnv does not touch it. Confirmed exactly
+	 * this gap in practice (2026-08-16): a real crash reached
+	 * AMutoRLVisualizerActor::Tick()'s RunInference with a non-finite
+	 * observation entry even after IsBodyStateValid-driven resets were
+	 * already firing regularly.
+	 */
+	inline bool IsContactStateValid(const TArray<FContactPointState>& ContactStates, int32 NumContactPoints, int32 Env, int32 NumEnvsForContacts)
+	{
+		for (int32 PointIdx = 0; PointIdx < NumContactPoints; ++PointIdx)
+		{
+			const int32 Idx = PointIdx * NumEnvsForContacts + Env;
+			if (!ContactStates.IsValidIndex(Idx) || !FMath::IsFinite(ContactStates[Idx].NormalForce))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Zeroes this env's own slots in ContactStates (bTouching=false,
+	 * NormalForce=0) -- the ContactPointState analogue of what ResetEnv does
+	 * for Batch. Call alongside ResetEnv whenever a reset is triggered by
+	 * IsTerminated, since ResetEnv itself does not touch ContactStates (it
+	 * only knows about Batch) -- without this, a non-finite NormalForce that
+	 * caused the reset would otherwise survive it untouched and immediately
+	 * fail the very next tick's IsContactStateValid check again. Safe for a
+	 * multi-env batch: only this env's strided slots are touched, so other
+	 * envs sharing the same ContactStates array are unaffected.
+	 */
+	inline void ClearContactStatesForEnv(TArray<FContactPointState>& ContactStates, int32 NumContactPoints, int32 Env, int32 NumEnvsForContacts)
+	{
+		for (int32 PointIdx = 0; PointIdx < NumContactPoints; ++PointIdx)
+		{
+			const int32 Idx = PointIdx * NumEnvsForContacts + Env;
+			if (ContactStates.IsValidIndex(Idx))
+			{
+				ContactStates[Idx] = FContactPointState();
+			}
+		}
+	}
+
+	/**
+	 * True once the creature has fallen over (too tilted or too low) or its
+	 * state has numerically blown up — caller resets the env when this is
+	 * true. ContactStates/NumContactPoints/NumEnvsForContacts are optional
+	 * (defaulted for source compatibility with every existing caller/test);
+	 * pass them to also catch the ContactPointState leak IsBodyStateValid
+	 * alone cannot see (see IsContactStateValid's comment) — every real
+	 * caller (the training driver's completion callback, the RL visualizer's
+	 * Tick) should pass them.
+	 */
+	inline bool IsTerminated(const FCreatureBatchState& Batch, int32 Env, const FEnvConfig& Config,
+		const TArray<FContactPointState>* ContactStates = nullptr, int32 NumContactPoints = 0, int32 NumEnvsForContacts = 1)
 	{
 		if (!IsBodyStateValid(Batch, Env))
+		{
+			return true;
+		}
+		if (ContactStates && !IsContactStateValid(*ContactStates, NumContactPoints, Env, NumEnvsForContacts))
 		{
 			return true;
 		}

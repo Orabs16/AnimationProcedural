@@ -37,16 +37,20 @@ bool FCreatureGroundContactDropTest::RunTest(const FString& Parameters)
 	constexpr float DropHeight = 50.0f;
 	const FVector Gravity(0.0f, 0.0f, -980.0f);
 
-	FContactParams Params;
+	// Velocity-level contact. Note there is no stiffness to derive from the
+	// body's mass here: the solver computes the articulated effective mass
+	// itself, so the same Hertz/DampingRatio pair applies to a 5 kg test body
+	// and to the 6170 kg creature alike. That mass-invariance is the main reason
+	// the penalty model was retired (SOLVER_DEBUG_LOG.md entry 021).
+	FImpulseContactParams Params;
 	Params.GroundZ = 0.0f;
-	// SpringK ~ Mass*|Gravity|/DesiredStaticSag: 5*980/~1.0 =~ 5000, giving
-	// roughly 1 unit of resting penetration. DamperK chosen for a
-	// comfortably-damped (not wildly oscillatory) settle — see the ratio
-	// note below.
-	Params.SpringK = 5000.0f;
-	Params.DamperK = 200.0f;
-	Params.FrictionK = 50.0f;
+	Params.ContactHertz = 30.0f;
+	Params.DampingRatio = 10.0f;
+	Params.Slop = 0.1f; // small: this test checks resting height to ~1 unit
 	Params.FrictionCoefficient = 0.8f;
+	Params.Iterations = 8;
+	Params.RelaxIterations = 0; // see FImpulseContactParams::RelaxIterations — ordering-dependent
+	FImpulseContactCache Cache;
 
 	TArray<FContactPointDef> Points;
 	Points.Add({ 0, FVector(0.0f, 0.0f, -FootOffset), TEXT("Foot"), 0 });
@@ -67,8 +71,10 @@ bool FCreatureGroundContactDropTest::RunTest(const FString& Parameters)
 	for (int32 Step = 0; Step < NumSteps; ++Step)
 	{
 		Batch.ClearExternalForces(0);
-		ApplyGroundContactForces(Batch, Topo, Points, Params);
+		// Impulse contact resolves AFTER integration — it corrects the velocity
+		// Step() just produced, rather than staging a force for it to consume.
 		Solver.Step(Batch, Dt, Gravity);
+		ResolveGroundContactImpulses(Batch, Topo, Points, Params, Solver, Dt, Cache);
 
 		const FVector Pos = Batch.GetBodyPos(0, 0);
 		const int32 Idx = Batch.BodyIndex(0, 0);
@@ -161,27 +167,27 @@ bool FCreatureGroundContactMutoTest::RunTest(const FString& Parameters)
 	Batch.Init(Topo, 1);
 	FCreatureABASolver Solver;
 
-	// MutoTopology's placeholder limb masses are ~1.0 (vs. the drop test's
-	// deliberately larger Mass=5) — scale SpringK/DamperK down to match
-	// (same SpringK/Mass and damping ratio as the drop test), and use the
-	// same smaller Dt: this is a stiff spring-damper system, and Dt=1/60
-	// (used elsewhere in this file's tests, fine for the ABA dynamics
-	// itself) is too large relative to a Mass~1 contact spring's natural
-	// frequency for semi-implicit Euler's stability bound.
-	// Matches AMutoRLTrainingDriver's own defaults (halved 2026-08-12 for
-	// the capsule contact model's possible double-simultaneous-contact —
-	// see ContactSpringK's comment there).
-	FContactParams Params;
-	Params.SpringK = 500.0f;
-	Params.DamperK = 20.0f;
+	// Identical settings to the drop test above, deliberately: the impulse model
+	// derives its own effective mass, so nothing needs rescaling between a 5 kg
+	// synthetic body and the real multi-tonne rig. Under the old penalty model
+	// this block had to carry its own hand-scaled SpringK/DamperK and a comment
+	// explaining the derivation — that whole class of per-rig retuning is what
+	// retiring it removed.
+	FImpulseContactParams Params;
+	Params.ContactHertz = 30.0f;
+	Params.DampingRatio = 10.0f;
+	Params.FrictionCoefficient = 0.8f;
+	Params.Iterations = 8;
+	Params.RelaxIterations = 0; // see FImpulseContactParams::RelaxIterations — ordering-dependent
+	FImpulseContactCache Cache;
 	constexpr float Dt = 1.0f / 240.0f;
 
 	bool bAnyNonFinite = false;
 	for (int32 Step = 0; Step < 10 && !bAnyNonFinite; ++Step)
 	{
 		Batch.ClearExternalForces(0);
-		ApplyGroundContactForces(Batch, Topo, Points, Params);
 		Solver.Step(Batch, Dt);
+		ResolveGroundContactImpulses(Batch, Topo, Points, Params, Solver, Dt, Cache);
 
 		for (int32 Body = 0; Body < Topo.NumBodies; ++Body)
 		{

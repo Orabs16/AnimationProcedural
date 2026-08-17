@@ -43,15 +43,26 @@ namespace MutoTopology
 	{
 		FName MountBone;
 		TArray<FName> JointBones;
+
+		/**
+		 * The mount bone's REAL anatomical parent, now that the spine is
+		 * independently articulated (see BuildMutoTopology's spine-body
+		 * construction phase) instead of being one fused torso body. F/M
+		 * mount onto the neck/back, not directly onto Pelvis -- this is what
+		 * makes the spine's flex actually reach the limbs (the front legs
+		 * follow the neck as it moves) rather than leaving them locked to
+		 * the pelvis while the neck articulates independently.
+		 */
+		FName ParentBone;
 	};
 
 	inline TArray<FLimbArchetype> GetMutoLimbArchetypes()
 	{
 		return {
-			{ TEXT("FShoulder"), { TEXT("FElbow"), TEXT("FElbow2"), TEXT("FElbow3"), TEXT("FHand"), TEXT("FTip") } },
-			{ TEXT("BShoulder"), { TEXT("BElbow1"), TEXT("BElbow2"), TEXT("BElbow3"), TEXT("BHand"), TEXT("BTip") } },
-			{ TEXT("MShoulder"), { TEXT("MElbow"), TEXT("MHand"), TEXT("MTip") } },
-			{ TEXT("Hips"), { TEXT("Knee1"), TEXT("Knee2"), TEXT("Feet"), TEXT("FeetTip") } },
+			{ TEXT("FShoulder"), { TEXT("FElbow"), TEXT("FElbow2"), TEXT("FElbow3"), TEXT("FHand"), TEXT("FTip") }, TEXT("Head1") },
+			{ TEXT("BShoulder"), { TEXT("BElbow1"), TEXT("BElbow2"), TEXT("BElbow3"), TEXT("BHand"), TEXT("BTip") }, TEXT("Back3") },
+			{ TEXT("MShoulder"), { TEXT("MElbow"), TEXT("MHand"), TEXT("MTip") }, TEXT("Back2") },
+			{ TEXT("Hips"), { TEXT("Knee1"), TEXT("Knee2"), TEXT("Feet"), TEXT("FeetTip") }, TEXT("Pelvis") },
 		};
 	}
 
@@ -62,6 +73,23 @@ namespace MutoTopology
 			TEXT("Pelvis"), TEXT("Back1"), TEXT("Back2"), TEXT("Back3"),
 			TEXT("Head1"), TEXT("Head2"), TEXT("UpperMouth"), TEXT("LowerMouth"), TEXT("Chin"),
 		};
+	}
+
+	/**
+	 * Torso-chain bones with no real skeletal child of their own — the end of
+	 * their branch, same structural role as a limb's "Tip" bone (see
+	 * FLimbArchetype's comment). No muscle is ever authored to drive them
+	 * independently (confirmed: this is why they'd otherwise get zero muscle
+	 * curves and, per ClampJointLimits, no joint-angle limit at all — a real
+	 * bug, found 2026-08-16 when UpperMouth/Chin free-spun to ~50 rad/s under
+	 * passive gravity alone and dragged the rest of the chain into a
+	 * divergence). User-confirmed (2026-08-16): treat them exactly like a
+	 * limb's Tip bone — no independent ABA body, fused rigidly (mass + rest
+	 * offset) into their real parent instead.
+	 */
+	inline TArray<FName> GetMutoTorsoLeafBones()
+	{
+		return { TEXT("UpperMouth"), TEXT("Chin") };
 	}
 
 	/**
@@ -86,17 +114,39 @@ namespace MutoTopology
 	/**
 	 * Builds an FCreatureTopology for Muto from its rig + authored profile data.
 	 *
-	 * Body 0 (torso) fuses the whole spine/head/mouth chain (GetMutoTorsoBones)
-	 * only — every limb's mount bone is its own real ABA body now (see
-	 * FLimbArchetype's comment on the Bone/Child semantics correction). Each
-	 * of the 8 limbs (GetMutoLimbArchetypes, x2 for _L/_R) becomes a chain of
-	 * ABA bodies: the mount bone as a 3-DOF ball joint, then every remaining
-	 * JointBones entry EXCEPT THE LAST as a 1-DOF Yaw revolute — the last
-	 * entry (the limb's Tip bone) gets no body at all, since no muscle is
-	 * ever authored to independently rotate it (see FLimbArchetype). Total
-	 * body/DOF count per limb is unchanged by this — it's still "one 3-DOF
-	 * ball + N 1-DOF revolutes" either way, just shifted by one link (mount
-	 * in, Tip out).
+	 * Body 0 is Pelvis alone (2026-08-16: previously fused the whole spine/
+	 * head/mouth chain into body 0; that chain is now independently
+	 * articulated -- see the spine-body construction phase below). Every
+	 * limb's mount bone is its own real ABA body (see FLimbArchetype's
+	 * comment on the Bone/Child semantics correction). Each of the 8 limbs
+	 * (GetMutoLimbArchetypes, x2 for _L/_R) becomes a chain of ABA bodies:
+	 * the mount bone as a 3-DOF ball joint (parented to its real anatomical
+	 * spine bone per FLimbArchetype::ParentBone, not always Pelvis), then
+	 * every remaining JointBones entry EXCEPT THE LAST as a 1-DOF Yaw
+	 * revolute — the last entry (the limb's Tip bone) gets no body at all,
+	 * since no muscle is ever authored to independently rotate it (see
+	 * FLimbArchetype). Total body/DOF count per limb is unchanged by this —
+	 * it's still "one 3-DOF ball + N 1-DOF revolutes" either way, just
+	 * shifted by one link (mount in, Tip out).
+	 *
+	 * The spine/head/jaw chain (GetMutoTorsoBones, minus Pelvis) is built as
+	 * 6 more 3-DOF ball-joint bodies (Back1-3, Head1-2, LowerMouth), each
+	 * parented to its REAL skeletal parent (derived from
+	 * RefSkel.GetParentIndex, not assumed from GetMutoTorsoBones' authoring
+	 * order — that list is flat/unordered and does not itself encode the
+	 * branch at Head2 -> {UpperMouth, LowerMouth}). Built BEFORE the limb
+	 * loop below, since F/B/M's mount bones need their real spine parent's
+	 * ABA body index to already exist. UpperMouth and Chin (GetMutoTorsoLeafBones)
+	 * are the end of their branch with no muscle ever authored to drive them
+	 * independently — same structural role as a limb's Tip bone, and now
+	 * treated identically: no ABA body, fused rigidly into their real parent
+	 * (Head2, LowerMouth) instead. (2026-08-16: they were briefly built as
+	 * real, unconstrained bodies — zero muscle curve meant zero joint-limit
+	 * too, per ClampJointLimits — and free-spun to ~50 rad/s under passive
+	 * gravity alone, dragging Head1 and the front arm mounted on it into a
+	 * divergence. User-identified root cause: they're leaves with no child,
+	 * exactly like Tip/FeetTip, and should never have been independent
+	 * bodies in the first place.)
 	 *
 	 * Per-body mass comes directly from MassAsset (currently a uniform 1.0
 	 * placeholder for every bone in the asset — this function doesn't invent
@@ -174,10 +224,12 @@ namespace MutoTopology
 		// assumption (the joint pivoting AT the mount bone = 3-DOF ball,
 		// every subsequent joint = 1-DOF Yaw revolute) — all 4 archetypes
 		// are authored now, not just F, so check all of them instead of
-		// just F. Restricted to limb bones (mount + chain, both sides) so
-		// the still-fused, differently-shaped torso/spine muscle data
-		// (Back*/Head*/Mouth, out of scope for this topology) doesn't spam
-		// unrelated warnings.
+		// just F. Restricted to limb bones (mount + chain, both sides) —
+		// the spine/head/jaw chain (Back*/Head*/Mouth) has no revolute
+		// bodies at all (every spine body is a 3-DOF ball), so this
+		// particular check has nothing to validate there; that data is
+		// picked up generically by the per-body muscle-curve lookup below
+		// instead, same as any other ball-joint body.
 		if (MuscleAsset)
 		{
 			TSet<FName> BallJointPivotBoneNames; // e.g. FShoulder_L, Hips_L — the mount bone itself IS the ball joint (see FLimbArchetype's comment)
@@ -218,9 +270,69 @@ namespace MutoTopology
 		TArray<FVector> JointOffsetInParent = { FVector::ZeroVector };
 		TArray<FQuat> RestRotInParent = { TorsoRestInComponentSpace.GetRotation() }; // body 0 slot repurposed — see comment above
 		TArray<FVector> JointAxisLocal = { FVector::UpVector };
-		TArray<float> Mass = { 0.0f }; // filled in after torso-fusion sum, below
-		TArray<FName> DebugBoneName = { TEXT("Torso") };
+		TArray<float> Mass = { 0.0f }; // Pelvis's own mass filled in below
+		TArray<FName> DebugBoneName = { TEXT("Pelvis") }; // body 0 is now just Pelvis, not a fused "Torso" blob
 		TMap<int32, FVector> FusedTipOffsetByBody; // see BodyFusedTipOffset's comment — applied to OutTopology after Build()
+		TMap<int32, float> FusedTipMassByBody;    // the Tip's authored mass, fused into its parent body below
+
+		// ---- Spine/head/jaw: independently-articulated 3-DOF ball joints ----
+		// Built BEFORE the limb loop below: F/B/M's mount bones need their
+		// real spine parent's ABA body index to already exist (see
+		// FLimbArchetype::ParentBone). Bone index Pelvis -> ABA body 0 seeds
+		// the map; every other torso bone's REAL skeletal parent (via
+		// RefSkel.GetParentIndex, not an assumed chain — see the function
+		// comment on why) must already be in the map when its own turn
+		// comes, which holds because GetMutoTorsoBones()' authoring order
+		// already happens to be a valid parent-before-child order (Pelvis,
+		// Back1, Back2, Back3, Head1, Head2, UpperMouth, LowerMouth, Chin) —
+		// verified against the real skeleton, not assumed (a lookup failure
+		// below would warn rather than silently mis-parent a bone).
+		TMap<int32, int32> SpineBodyIndexByBoneIdx;
+		SpineBodyIndexByBoneIdx.Add(PelvisIdx, 0);
+		const TArray<FName> TorsoLeafBones = GetMutoTorsoLeafBones();
+		for (const FName& BoneName : GetMutoTorsoBones())
+		{
+			if (BoneName == TEXT("Pelvis"))
+			{
+				continue; // already body 0
+			}
+			const int32 BoneIdx = RefSkel.FindBoneIndex(BoneName);
+			if (BoneIdx == INDEX_NONE)
+			{
+				OutWarnings.Add(FString::Printf(TEXT("BuildMutoTopology: could not find spine bone '%s' — skipping."), *BoneName.ToString()));
+				continue;
+			}
+			const int32 ParentBoneIdx = RefSkel.GetParentIndex(BoneIdx);
+			const int32* ParentBodyIdxPtr = (ParentBoneIdx != INDEX_NONE) ? SpineBodyIndexByBoneIdx.Find(ParentBoneIdx) : nullptr;
+			if (!ParentBodyIdxPtr)
+			{
+				OutWarnings.Add(FString::Printf(TEXT("BuildMutoTopology: spine bone '%s' has no already-built parent body — skipping (its real skeletal parent isn't one of the fused torso bones, or GetMutoTorsoBones() no longer lists it in parent-before-child order)."), *BoneName.ToString()));
+				continue;
+			}
+
+			if (TorsoLeafBones.Contains(BoneName))
+			{
+				// No independent joint (see GetMutoTorsoLeafBones' comment) --
+				// fuse rigidly into the real parent body instead, same
+				// mechanism a limb's Tip bone already uses below.
+				FusedTipOffsetByBody.Add(*ParentBodyIdxPtr, GetRestTransformRelativeTo(RefSkel, BoneIdx, ParentBoneIdx).GetTranslation());
+				FusedTipMassByBody.Add(*ParentBodyIdxPtr, GetMass(BoneName));
+				continue;
+			}
+
+			const FTransform RestRelToParentBody = GetRestTransformRelativeTo(RefSkel, BoneIdx, ParentBoneIdx);
+			const int32 ThisBody = BodyParent.Num();
+			BodyParent.Add(*ParentBodyIdxPtr);
+			BodyDOFCount.Add(3);
+			BodyLimbIndex.Add(INDEX_NONE); // not a limb
+			JointOffsetInParent.Add(RestRelToParentBody.GetTranslation());
+			RestRotInParent.Add(RestRelToParentBody.GetRotation());
+			JointAxisLocal.Add(FVector::ZeroVector); // unused for ball joints
+			Mass.Add(GetMass(BoneName));
+			DebugBoneName.Add(BoneName);
+
+			SpineBodyIndexByBoneIdx.Add(BoneIdx, ThisBody);
+		}
 
 		const TArray<FLimbArchetype> Archetypes = GetMutoLimbArchetypes();
 		int32 LimbIndex = 0;
@@ -245,17 +357,27 @@ namespace MutoTopology
 				}
 
 				// ---- Mount bone: the limb's own 3-DOF ball joint, relative
-				// to the torso — see FLimbArchetype's comment on the
-				// Bone/Child semantics correction (a "MountBone_muscle_
+				// to its REAL anatomical spine parent (FLimbArchetype::
+				// ParentBone — F/M mount on the neck/back, not Pelvis; see
+				// that field's comment) — see FLimbArchetype's comment on
+				// the Bone/Child semantics correction (a "MountBone_muscle_
 				// Roll/Yaw/Pitch" triple, BoneName==MountBone, is what
 				// actually drives this). ----
-				const FTransform MountRestRelToPelvis = GetRestTransformRelativeTo(RefSkel, MountBoneIdx, PelvisIdx);
+				const int32 MountParentBoneIdx = RefSkel.FindBoneIndex(Archetype.ParentBone);
+				const int32* MountParentBodyIdxPtr = (MountParentBoneIdx != INDEX_NONE) ? SpineBodyIndexByBoneIdx.Find(MountParentBoneIdx) : nullptr;
+				if (!MountParentBodyIdxPtr)
+				{
+					OutWarnings.Add(FString::Printf(TEXT("BuildMutoTopology: could not find mount parent body '%s' for '%s' — skipping limb."), *Archetype.ParentBone.ToString(), *MountBoneName.ToString()));
+					continue;
+				}
+
+				const FTransform MountRestRelToParent = GetRestTransformRelativeTo(RefSkel, MountBoneIdx, MountParentBoneIdx);
 				const int32 MountBody = BodyParent.Num();
-				BodyParent.Add(0);
+				BodyParent.Add(*MountParentBodyIdxPtr);
 				BodyDOFCount.Add(3);
 				BodyLimbIndex.Add(ThisLimbIndex);
-				JointOffsetInParent.Add(MountRestRelToPelvis.GetTranslation());
-				RestRotInParent.Add(MountRestRelToPelvis.GetRotation());
+				JointOffsetInParent.Add(MountRestRelToParent.GetTranslation());
+				RestRotInParent.Add(MountRestRelToParent.GetRotation());
 				JointAxisLocal.Add(FVector::ZeroVector); // unused for ball joints
 				Mass.Add(GetMass(MountBoneName));
 				DebugBoneName.Add(MountBoneName);
@@ -307,8 +429,8 @@ namespace MutoTopology
 					BodyLimbIndex.Add(ThisLimbIndex);
 					JointOffsetInParent.Add(RestRelToParentBody.GetTranslation());
 					RestRotInParent.Add(RestRelToParentBody.GetRotation());
-					// Yaw = local -Y in the parent bone's own rest frame, per
-					// the rig's joint orient convention: +X points toward the
+					// Yaw = local -Y in THIS BONE'S OWN rest frame, per the
+					// rig's joint orient convention: +X points toward the
 					// child bone, +Z points into the interior of the range of
 					// motion, +Y flips sign between the _L/_R sides. The axis
 					// is negated (-Y, not +Y) because FQuat(Axis,Angle)'s
@@ -324,7 +446,31 @@ namespace MutoTopology
 					// MinRange/MaxRange authored in that same tool/convention
 					// — those two only make sense if JointPos's sign matches
 					// the editor's angle sign exactly.
-					JointAxisLocal.Add(FVector(0.0f, -1.0f, 0.0f));
+					//
+					// ROTATED INTO THE PARENT'S FRAME (2026-08-14). The muscle
+					// that drives this joint is authored as
+					// "<ThisBone>_muscle_Yaw_*" with BoneName==ThisBone, so
+					// "Yaw" names an axis of THIS bone, not of its parent —
+					// but BodyJointAxisLocal is consumed as
+					// ParentRot.RotateVector(axis) (CreatureBatchSolver.h
+					// Pass 1), i.e. in the PARENT's frame. The two frames
+					// differ by exactly RestRelToParentBody, which on this rig
+					// is a large rotation (Knee1: 235°), so storing a bare
+					// (0,-1,0) here made the solver rotate about the PARENT's
+					// yaw axis instead of the bone's own. On Knee1 those axes
+					// are nearly perpendicular, and 99.3% of every commanded
+					// yaw came out as ROLL of a joint that has no roll DOF —
+					// user-observed in the editor, then measured. Every one of
+					// the 26 revolutes leaked, 2.5% to 99.3%; the ones that
+					// looked fine did so only because their rest rotation
+					// happened to be nearly a pure Y rotation, which leaves Y
+					// invariant. See SOLVER_DEBUG_LOG.md entry 022.
+					//
+					// The ball-joint path was always correct here — it builds
+					// JointFrame = ParentRot * BodyRestRotInParent (the bone's
+					// own frame) before interpreting its DOFs. This brings the
+					// revolute path onto that same frame convention.
+					JointAxisLocal.Add(RestRelToParentBody.GetRotation().RotateVector(FVector(0.0f, -1.0f, 0.0f)));
 					Mass.Add(GetMass(JointBoneName));
 					DebugBoneName.Add(JointBoneName);
 
@@ -341,6 +487,14 @@ namespace MutoTopology
 					if (TipBoneIdx != INDEX_NONE)
 					{
 						FusedTipOffsetByBody.Add(ParentBody, GetRestTransformRelativeTo(RefSkel, TipBoneIdx, ParentBoneIdx).GetTranslation());
+						// The Tip has no body of its own (no muscle drives it), but
+						// it still has MASS, and that mass sits out at the end of a
+						// long lever where it contributes substantially to the
+						// parent's inertia and shifts its CoM. Capturing it here so
+						// the per-body loop below can fuse it in — without this its
+						// authored mass was silently discarded (measured: 8 kg over
+						// the 8 Tip bones, see SOLVER_DEBUG_LOG.md entry 008).
+						FusedTipMassByBody.Add(ParentBody, GetMass(TipBoneName));
 					}
 				}
 			}
@@ -354,31 +508,29 @@ namespace MutoTopology
 			OutTopology.BodyFusedTipOffset[Pair.Key] = Pair.Value;
 		}
 
-		// ---- Torso (body 0): fuse spine/head/mouth only — limb mount bones
-		// are now their own real ABA bodies, not fused in here (see
-		// FLimbArchetype's comment). ----
+		// ---- Pelvis (body 0): its OWN mass/inertia only now — the rest of
+		// the spine/head/mouth chain has its own real ABA bodies (built
+		// above), not fused in here. ----
 		{
-			float TorsoMass = 0.0f;
-			for (const FName& BoneName : GetMutoTorsoBones())
-			{
-				TorsoMass += GetMass(BoneName);
-			}
-			Mass[0] = TorsoMass;
+			const float PelvisMass = GetMass(TEXT("Pelvis"));
+			Mass[0] = PelvisMass;
 			// See the comment on TorsoRestInComponentSpace above — this is the
 			// only place body 0's own BodyRestRotInParent slot gets set (the
 			// per-body loop below starts at Body=1).
 			OutTopology.BodyRestRotInParent[0] = RestRotInParent[0];
 
-			// Placeholder torso inertia, same thin-rod approximation as the
-			// limbs below, using the spine's overall length (Pelvis -> Head1) as
-			// the proxy "L". See the function comment: no real inertia source
+			// Placeholder Pelvis inertia, same thin-rod approximation as
+			// every other body below, using the distance to Back1 (Pelvis's
+			// real spine child now, same role Head1 played as a rough "how
+			// big is this body" proxy when the whole chain was fused) as the
+			// proxy "L". See the function comment: no real inertia source
 			// exists yet.
-			const int32 Head1Idx = RefSkel.FindBoneIndex(TEXT("Head1"));
-			const float SpineLength = Head1Idx != INDEX_NONE
-				? static_cast<float>(GetRestTransformRelativeTo(RefSkel, Head1Idx, PelvisIdx).GetTranslation().Size())
+			const int32 Back1Idx = RefSkel.FindBoneIndex(TEXT("Back1"));
+			const float SpineLength = Back1Idx != INDEX_NONE
+				? static_cast<float>(GetRestTransformRelativeTo(RefSkel, Back1Idx, PelvisIdx).GetTranslation().Size())
 				: 100.0f;
-			const float IPerp = (1.0f / 12.0f) * TorsoMass * SpineLength * SpineLength;
-			OutTopology.BodyMass[0] = TorsoMass;
+			const float IPerp = (1.0f / 12.0f) * PelvisMass * SpineLength * SpineLength;
+			OutTopology.BodyMass[0] = PelvisMass;
 			OutTopology.BodyLocalCoMOffset[0] = FVector::ZeroVector;
 			OutTopology.BodyInertiaDiagLocal[0] = FVector(0.05f * IPerp, IPerp, IPerp);
 		}
@@ -405,11 +557,61 @@ namespace MutoTopology
 				if (OutTopology.BodyParent[Candidate] == Body) { ChildBody = Candidate; break; }
 			}
 			const FVector LengthVec = (ChildBody != INDEX_NONE) ? JointOffsetInParent[ChildBody] : JointOffsetInParent[Body];
-			OutTopology.BodyLocalCoMOffset[Body] = 0.5f * LengthVec;
+			const FVector OwnCoM = 0.5f * LengthVec;
 
 			const float BodyLength = static_cast<float>(LengthVec.Size());
 			const float IPerp = (1.0f / 12.0f) * Mass[Body] * BodyLength * BodyLength;
-			OutTopology.BodyInertiaDiagLocal[Body] = FVector(0.05f * IPerp, IPerp, IPerp);
+			const FVector OwnInertiaDiag(0.05f * IPerp, IPerp, IPerp);
+
+			// ---- Fuse the unarticulated Tip bone, if this body has one ----
+			// The Tip is not its own ABA body (no muscle drives it), but it has
+			// real mass sitting at the far end of a long lever — Feet's Tip is
+			// 106 cm out — so it both shifts the parent's CoM and adds a large
+			// parallel-axis term to its inertia. It also carries the contact
+			// point (see BuildMutoContactPoints), which means it was previously
+			// pushing on the ground while contributing no mass at all: the
+			// ground reaction torqued a body that did not include the geometry
+			// generating it. Treated as a POINT mass at BodyFusedTipOffset —
+			// the Tip's own shape is unknown and its own spin inertia is second
+			// order next to m*r^2 at this lever.
+			const float* TipMassPtr = FusedTipMassByBody.Find(Body);
+			const FVector* TipOffsetPtr = FusedTipOffsetByBody.Find(Body);
+			const float TipMass = TipMassPtr ? *TipMassPtr : 0.0f;
+
+			if (TipMassPtr && TipOffsetPtr && TipMass > 0.0f)
+			{
+				const FVector TipPos = *TipOffsetPtr;
+				const float TotalMass = Mass[Body] + TipMass;
+				const FVector FusedCoM = (Mass[Body] * OwnCoM + TipMass * TipPos) / TotalMass;
+
+				// Shift each part's inertia from its own CoM to the FUSED CoM.
+				// Parallel axis: I += m * (|d|^2 * Identity - d (x) d). Only the
+				// diagonal is kept, since FCreatureTopology stores a diagonal
+				// inertia — consistent with the thin-rod placeholder already in
+				// use, and the off-diagonal terms are small while the limb axis
+				// stays roughly aligned with the offsets.
+				auto ParallelAxisDiag = [](float M, const FVector& D)
+				{
+					return FVector(
+						M * (D.Y * D.Y + D.Z * D.Z),
+						M * (D.X * D.X + D.Z * D.Z),
+						M * (D.X * D.X + D.Y * D.Y));
+				};
+
+				const FVector FusedInertia =
+					OwnInertiaDiag
+					+ ParallelAxisDiag(Mass[Body], OwnCoM - FusedCoM)
+					+ ParallelAxisDiag(TipMass, TipPos - FusedCoM);
+
+				OutTopology.BodyMass[Body] = TotalMass;
+				OutTopology.BodyLocalCoMOffset[Body] = FusedCoM;
+				OutTopology.BodyInertiaDiagLocal[Body] = FusedInertia;
+			}
+			else
+			{
+				OutTopology.BodyLocalCoMOffset[Body] = OwnCoM;
+				OutTopology.BodyInertiaDiagLocal[Body] = OwnInertiaDiag;
+			}
 		}
 
 		// ---- Per-DOF muscle strength curves, one authored FMassMuscleDataMuscle

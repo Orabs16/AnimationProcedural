@@ -253,9 +253,25 @@ inline FSpatialVec TranslateForce(const FSpatialVec& F, const FVector& R)
 
 /**
  * Translate a spatial MOTION vector (velocity or acceleration) from point A to
- * point B, R = posB - posA. NOTE: for acceleration this omits the velocity-
- * product ("Coriolis") correction term a fully time-varying transform would
- * include — see CreatureABASolver.h Pass 3 comment.
+ * point B, R = posB - posA.
+ *
+ * This is the pure frame-translation part only: {w, v} -> {w, v + w x R}.
+ * For VELOCITY that is complete and exact (v_B = v_A + w x R).
+ *
+ * For ACCELERATION it is NOT complete on its own — the full transport is
+ *     a_B = a_A + alpha x R + w x (w x R)
+ * and the velocity-product term w x (w x R) is not representable here, since
+ * this function only sees the vector being transported and R, not the angular
+ * velocity that produced them. The caller must add that term itself.
+ *
+ * CreatureBatchSolver.h does exactly that: it computes the velocity-product
+ * bias C per body in Pass 1 (where the parent's angular velocity is in hand)
+ * and adds it in Pass 2 and Pass 3b. See the derivation on CAcc's declaration.
+ *
+ * HISTORY: that term used to be omitted entirely, documented as a deliberate
+ * accuracy trade-off. It was not a trade-off — it made the modelled system
+ * itself divergent (energy created in a closed system; blowup at a dt-invariant
+ * time no substep count could fix). See SOLVER_DEBUG_LOG.md entries 002-003.
  */
 inline FSpatialVec TranslateMotion(const FSpatialVec& M, const FVector& R)
 {

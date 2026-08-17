@@ -9,18 +9,11 @@ CompileFlags:
   Compiler: c:/Program Files/LLVM/bin/clang-cl.exe
   Add:
     - /X
-    - /I T:\GIT\AnimationProcedural\Plugins\MassMuscleProfile\Intermediate\Build\Win64\UnrealEditor\Inc\MassMuscleProfile\UHT
-    - /I C:\Program Files\Epic Games\UE_5.6\Engine\Plugins\Animation\ControlRig\Intermediate\Build\Win64\UnrealEditor\Inc\ControlRig\UHT
-    - /I C:\Program Files\Epic Games\UE_5.6\Engine\Plugins\Animation\ControlRig\Intermediate\Build\Win64\UnrealEditor\Inc\ControlRig\VNI
-    - /I C:\Program Files\Epic Games\UE_5.6\Engine\Plugins\Animation\ControlRig\Source\ControlRig\Public
-    - /I C:\Program Files\Epic Games\UE_5.6\Engine\Source\Runtime\PropertyPath\Public
-    - /I C:\Program Files\Epic Games\UE_5.6\Engine\Source\Runtime\Core\Public
-    - /I C:\Program Files\Epic Games\UE_5.6\Engine\Plugins\Runtime\RigVM\Source\RigVM\Public
-    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\cppwinrt
-    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\shared
-    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\ucrt
-    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\um
-    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\winrt
+    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\cppwinrt
+    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared
+    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt
+    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um
+    - /imsvcC:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\winrt
     - /imsvcC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.38.33130\include
     - -fms-compatibility-version=19.38.33141
     - /std:c++20
