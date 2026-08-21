@@ -2406,3 +2406,402 @@ joint types, momentum conservation, the exact damping fractions, welding, the lo
 builder's one-sided rule, and global-vs-per-row agreement) and
 `AgentSolver.TEMP.RigUpgradeCheck` (the table above — delete once these numbers
 are considered recorded, the way entry 021 deleted four answered diagnostics).
+
+---
+
+## Entry 027 — Dead-code removal, and two write-only fields that turned out not to be cosmetic
+
+**Date:** 2026-08-21
+**Trigger:** direct request against the `OPEN_ITEMS.md` register — delete `U-08` and
+`D-02`, invoke the never-invoked domain randomization (`U-07`), and start reading the two
+authored fields nothing read (`U-10`, `U-11`).
+**Status:** all five done. Build clean, 22/22 automation tests pass (24 before; the two
+deleted are `TEMP.OffsetWrench` and `TEMP.WrenchPropagation`, whose subject no longer
+exists). Real-rig behaviour unchanged in the passive drop — `TEMP.RigUpgradeCheck`
+reproduces entry 026's table digit-for-digit, `ALL` still 15.34 peak penetration, torso
+108.68, 50 s with no divergence.
+
+### The headline: `U-10` is not a cleanup, it is a physics change
+
+`FMassMuscleDataMuscle::ExtensionStrength` / `FlexionStrength` were described in the
+register as "editable, mirrored, saved — and ignored". Wiring them through was expected to
+be a no-op on the shipped rig, on the assumption that nobody had moved them off 1.0.
+
+That assumption was wrong, and the measurement is now a permanent assertion in
+`AgentSolver.MutoTopology`:
+
+    Authored muscle strengths: 67/68 curve DOFs, 44 differ from 1.0, range [0.500, 5.000]
+
+**44 of 67 curve-bearing DOFs carry a non-unit authored strength, spanning a 10x spread.**
+So this change makes the strongest joints deliver 5x the torque they delivered yesterday
+and the weakest half of it. Consequences that follow directly:
+
+- `FEnvConfig::MaxTorquePerDOF` is **no longer a ceiling on delivered torque**. It clamps
+  the COMMANDED torque; the multiplier that used to be bounded by the curve (which peaks
+  at 1) is now curve x scalar and reaches 5. The comment on that field says so now.
+- Any policy weights trained before today were trained against a uniformly-strong
+  creature and are not comparable to weights trained after. This is exactly the
+  topology/observation-provenance gap `X-06` describes, arriving in a new form: nothing
+  records which muscle calibration a snapshot was trained under.
+- Entry 017's torque rescale reasoning ("5e7 gives ~1.5x margin over the worst holding
+  torque") was derived with the multiplier capped at 1. On the 44 affected DOFs that
+  margin is now anywhere from 0.75x to 7.5x. **This has not been re-swept.**
+
+Not changed here, deliberately: no clamp was added on the multiplier. Clamping it would
+restore the ceiling but would also flatten the authored variation back out, which is the
+thing the request was about. The clamp is a one-line change in
+`ComputeMuscleMultipliers` if the 5x turns out to destabilise training.
+
+### `U-08` — external wrench removed, and what it was actually holding up
+
+Removed `ApplyForceAtPoint`, `ClearExternalForces`, the six `ExtForce*`/`ExtTorque*`
+per-body-per-env arrays, the `HitWrench` load in both step variants, and the driver's
+per-substep clear loop (256 envs x 4 substeps x 41 bodies of zeroing zeros).
+
+The register called this "written only by tests". That was accurate but incomplete: one of
+those tests, `AgentSolver.PendulumEnergyConservation`, was using it **structurally**, and
+no substitute existed. The anchor trick needs a per-body force, because:
+
+> A huge mass does not resist gravity. Gravity accelerates every mass equally regardless
+> of size, so a 1e5 kg anchor free-falls at exactly -980 like the rod hanging off it, the
+> assembly develops no internal stress, and the pendulum does not swing at all.
+
+Pinning the anchor's pose after each `Step()` does not fix this either — the joint
+acceleration was already computed inside a free-falling (i.e. weightless) system, so the
+pendulum is dead before the pin runs. Verified by reasoning before implementing, not
+after a failed attempt.
+
+Replaced with `FCreatureTopology::BodyGravityScale` — a per-body multiplier on the gravity
+wrench, MuJoCo's `gravcomp` in ratio form, defaulting to 1. It is per-BODY topology data,
+not per-env state, so in the SIMD path it broadcasts once per body alongside `BaseMass8`
+and costs zero additional memory traffic in the inner loop. Six per-body-per-env float
+arrays became one per-body float. The pendulum's anchor now sets it to 0 and the test
+passes unchanged (energy spread 2.45% of scale, anchor displacement 1.7 cm over 8.3 s).
+
+`TEMP.OffsetWrench` and `TEMP.WrenchPropagation` were deleted outright — both existed to
+diagnose the wrench path (entries 010/011/012), and both questions are recorded as
+answered.
+
+### `D-02` — joint speed limiting removed
+
+`ClampJointSpeed` and `MaxJointSpeedDegPerSec` are gone. It was off by default, and
+`R-05` recorded that its ordering had never been validated: it ran AFTER
+`ResolveGroundContactImpulses`, clipping the very joint velocities the limit and contact
+rows had just solved for, with no re-solve. Deleting it removes that hazard rather than
+leaving a knob that silently corrupts the constraint solution when anyone turns it on.
+
+### `U-07` — domain randomization now actually runs
+
+`CreatureRLEnvironment::FDomainRandomization` (limb strength range, limb-loss chance,
+carried mass), drawn by `ResetEnv` on every episode reset, exposed on the driver under
+`Muto RL|Reset|Domain Randomization`. **Off by default** — enabling it changes what the
+policy is being asked to solve, so it is an explicit decision.
+
+Two details that are easy to get wrong and are handled:
+
+1. `RandomizeEnv` is called even when randomization is DISABLED, with neutral arguments.
+   The three arrays are episode-persistent state, not per-step inputs, so an env that drew
+   a weak or missing limb would otherwise keep it forever after the feature was switched
+   back off.
+2. The limb-loss test was `FRand() > LimbLossChance`, and `FRand()` is half-open `[0,1)`.
+   A draw of exactly 0.0 with chance 0 disabled a limb. Now `LimbLossChance > 0 &&
+   FRand() < LimbLossChance`, which short-circuits at zero.
+
+### `U-11` — `BoneIndex` is now the lookup key
+
+`FMassMuscleDataMass::BoneIndex` was write-only: `InitializeFromSkeletalMesh` stamped it
+and nothing read it, so a mesh re-import that added, removed or reordered bones left every
+stored index silently wrong with no symptom.
+
+- `UMassMuscleProfileAssetMass::PostLoad` now calls a new `SyncBoneIndices()`, which
+  repairs every index from its name against the current skeleton.
+- `FindBoneByIndex` added; `FindBoneByName` kept as the fallback for callers with no
+  reference skeleton (the extracted sub-chains `TEMP.IsolatedLimb` builds).
+- `FCreatureTopology::BodyBoneIndex` added and filled by `BuildMutoTopology`, whose
+  mass/radius/capsule lookups are now index-keyed. Every call site already had the index
+  in hand — it had resolved the name to walk the skeleton — so this costs nothing.
+- `BuildMutoContactPoints` prefers the index, falling back to the name.
+
+The point is not the FName-vs-int32 comparison. It is that **a field that is read is a
+field that gets maintained**, and `AgentSolver.MutoTopology` now asserts that the index
+names the same bone the debug name does. An off-by-one there would have given every body
+its neighbour's authored mass, radius and capsule — a plausible-looking rig rather than an
+obviously broken one.
+
+### What this does NOT mean
+
+- Nothing here was measured on a DRIVEN rig. `TEMP.RigUpgradeCheck` is a passive drop at
+  zero torque, so it cannot see `U-10` at all — the multiplier scales `JointTorque`, which
+  is zero throughout. The 5x is unexercised by any test that currently runs.
+- Domain randomization is implemented and reachable, not validated. Nobody has yet
+  trained with it on, and the limb-loss knob in particular is harsh for a creature that
+  has not learned to stand on all its limbs (`O-08`, still never tested).
+- `BodyGravityScale` is exercised only by the pendulum anchor (scale 0) and defaults
+  everywhere else. The intermediate values are untested.
+
+---
+
+## Entry 028 — Inertia derived from the authored collision radius. The magic 0.05 is gone.
+
+**Date:** 2026-08-21
+**Trigger:** direct request — reuse the capsule radius the collision model already reads,
+instead of the 5% fudge, for inertia.
+**Status:** done. Build clean, 22/22 pass. The rig is **more robust**, not just different:
+every configuration that survived still survives, and every marginal one survives longer.
+
+### What the 0.05 was actually claiming
+
+Every body's inertia was a thin uniform rod about its own bone length:
+
+    IPerp  = (1/12) * m * L^2
+    IAxial = 0.05 * IPerp          <- "~0 (not exactly, for numerical safety)"
+
+A rod has no thickness, so its axial term is identically zero, and 0.05 was a placeholder
+for a shape nobody had measured. But a placeholder still *asserts* something. Solving it
+against a real solid reveals what:
+
+    0.5 * m * r^2 == 0.05 * (1/12) * m * L^2   =>   r = L / sqrt(120) = 0.0913 * L
+
+**The old model claimed every bone on the creature is exactly 9.1% as thick as it is
+long.** The authored collision radii — which the ground and limb-collision paths have been
+reading all along — disagree, in both directions:
+
+| bone | authored r | L | r/L | r the fudge implied |
+|---|---|---|---|---|
+| Back3 | 82.91 | 97.52 | **0.850** | 8.90 |
+| Back1 | 61.92 | 90.44 | **0.685** | 8.26 |
+| Hips_L | 49.33 | 228.78 | 0.216 | 20.88 |
+| FShoulder_L | 40.38 | 242.91 | 0.166 | 22.17 |
+| FHand_L | 8.85 | 79.73 | 0.111 | 7.28 |
+| Feet_L | 9.39 | 155.13 | **0.061** | 14.16 |
+
+So it was not a conservative approximation. It was a different creature: a spine 9x too
+thin and feet 1.5x too fat. Measured across the rig, **axial inertia moves by 77.5x on
+`Back3` and 0.35x on `Feet_L`** (reported by a new permanent line in
+`AgentSolver.MutoTopology`).
+
+The deeper problem was not the number, it was that **collision read real geometry while
+the mass model silently assumed a different one**. One authored value now decides how
+thick a bone is for both.
+
+### The model
+
+`MutoTopology::CapsuleInertiaDiagLocal(mass, radius, length)` — a solid capsule of uniform
+density: a cylinder of radius R and length L capped by a hemisphere at each end, long axis
+local +X, mass split between cylinder and caps by volume.
+
+    IAxial = 0.5*m_cyl*R^2 + 0.4*m_cap*R^2
+    IPerp  = m_cyl*(L^2/12 + R^2/4) + m_cap*(0.4*R^2 + L^2/4 + 0.375*L*R)
+
+Two conventions worth stating because both could reasonably have gone the other way:
+
+- **L is the BONE length, not the collision capsule's length.**
+  `BodyCapsuleHalfHeight` defaults to 0, which collapses the *collision* capsule to a
+  sphere at the tip — but the bone's *mass* still spans the whole segment. Using the
+  collision length would have given most bones a point-like mass distribution, which is
+  worse than the rod it replaced.
+- **The cylinder-length + two-caps convention matches `MutoMassAuthoringDumpTest`'s volume
+  formula exactly** (`pi*r^2*L + (4/3)*pi*r^3`). The shape this derives inertia from is now
+  the same shape that test derives its *suggested mass* from — previously those two
+  disagreed about the creature's geometry while sitting in the same module.
+
+### A wrong claim, caught by asserting it
+
+The first fallback for a bone with no authored radius substituted `r = L/sqrt(120)`, on
+the equivalence above, and the comment claimed it reproduced the old axial term "EXACTLY"
+and the transverse one "to within 2.5%".
+
+**Both numbers were wrong**, and the test asserting the comment failed:
+
+| | old rod | capsule at L/sqrt(120) | error |
+|---|---|---|---|
+| axial | 20.00 | 19.56 | 2.2% |
+| transverse | 400.0 | 515.3 | **29%** |
+
+The equivalence solves correctly for a *cylinder*. A capsule splits mass with its caps and
+then puts them **outside** L, where they contribute a large parallel-axis term. The
+fallback now returns the old rod directly — exact by construction rather than by an
+equivalence argument — and `BuildMutoTopology` **warns** when it fires, instead of
+silently substituting a made-up thickness. Silent substitution is how the 0.05 lived
+unexamined as long as it did.
+
+Only `Pelvis` reaches that path today: it has no ground-contact geometry, so nobody ever
+needed to author it a radius. Authoring one picks it up with no code change.
+
+### Effect on the real rig (passive drop, shipped defaults)
+
+| metric | before | after | |
+|---|---|---|---|
+| peak penetration | 15.34 | 18.89 | +23% |
+| resting penetration | 2.60 | **1.90** | −27% |
+| torso settle height | 108.68 | 85.43 | −21% |
+| max joint speed | 59.1 | **28.7** | −51% |
+| cost | 1.100 | 1.131 ms/substep | +3% |
+
+Still 50 s with no divergence, and it settles *harder*: torso drift over the last 40 s is
+**0.01 cm**, against 0.2 cm before.
+
+The ablation rows moved more than the shipped one, all in the same direction — the marginal
+configurations survive substantially longer:
+
+| config | before | after |
+|---|---|---|
+| `row+passive` | 2.54 s | **5.54 s** |
+| `glob+passive` | 2.68 s | **5.00 s** |
+| `glob+pas+lim` | 2.35 s | **3.72 s** |
+| `ALL row` peak pen | 24.83 | **10.84** |
+
+That is the expected direction: more rotational inertia means the same constraint impulse
+produces less angular velocity, so the Gauss-Seidel sweeps have less to chase. It is
+corroboration, not proof — nothing here was tuned for.
+
+### What this does NOT mean
+
+- **Still a derivation, not a measurement.** Nobody has authored an inertia tensor. Mass,
+  radius and length are authored; the tensor is inferred from a shape assumption. `A-01`
+  narrows, it does not close.
+- **Storage is still diagonal-only** (`A-04`). The capsule's own tensor is genuinely
+  diagonal in its local frame, so this is exact for the un-fused bodies — but the fused-Tip
+  parallel-axis step still discards real off-diagonal terms.
+- **The authored radii are now load-bearing for dynamics, and their coverage is unaudited**
+  (`A-06`). A wrong radius used to produce a visibly wrong contact point; it now also
+  silently produces wrong inertia. `Back3` at r/L = 0.85 is a sphere, not a bone — whether
+  that is the intended collision geometry or an artefact of authoring for contact only has
+  never been checked.
+- **Passive drop only.** Zero torque throughout, so this says nothing about how the change
+  interacts with the 0.5x–5x muscle strengths from entry 027 (`X-08`).
+
+---
+
+## Entry 029 — O-07 re-fit. ContactHertz 15 → 45. The passive drop could never have fitted this.
+
+**Date:** 2026-08-21
+**Trigger:** direct request — redo the shipped contact constants against the current rig.
+**Status:** done. `ContactHertz` 15 → **45**; `ContactDampingRatio` stays at **10**, which
+the sweep independently re-selected. 13/13 affected tests pass.
+
+### The finding that matters more than the constant
+
+**A passive drop cannot fit these constants. All 24 (Hertz, ζ) pairs survive it.**
+
+That is the whole of the evidence entry 018 used, and it is the whole of the evidence
+every contact sweep in this project's history has used. The regime does not discriminate:
+it ranks penetration quality and says nothing about stability, because nothing is unstable
+in it. Under torque babble at 30% of `MaxTorquePerDOF`, 5 of the same 24 diverge — and over
+50 s, **only 3 of 15 survive**.
+
+So the criticism recorded against O-07 (wrong joint axes in entry 022, no torso collision
+in entry 025, thin-rod inertia in entry 028) was real but understated. Those three make the
+old number *stale*. Using a passive drop makes it *unfalsifiable*.
+
+### The gate kept being shorter than the failure mode
+
+Three passes, each one selecting a pair that then died just past the window it was
+selected in:
+
+| gate | winner it picked | when that winner actually died |
+|---|---|---|
+| 6 s driven | 30 / 20 | 12.33 s |
+| 12 s driven | 45 / 2 | 28.36 s |
+| 50 s driven | **45 / 10** | survives |
+
+The selection *rule* was fixed in the test header before any numbers existed and was not
+changed — gate 1 already said "no divergence". What changed each time is that the gate was
+being tested over a horizon shorter than the thing it was gating. Worth stating plainly
+because the failure is seductive: each intermediate table looked clean and internally
+consistent, and each one was fitted to noise.
+
+### Result
+
+50 s, both regimes:
+
+| pair | regime | maxPen | restPen | torsoZ | |
+|---|---|---|---|---|---|
+| 15 / 10 (old) | drop | 18.89 | 2.01 | 85.43 | survives |
+| 15 / 10 (old) | drive | 3.5e11 | — | — | **diverges 35.55 s** |
+| 45 / 10 (new) | drop | 47.95 | 2.29 | 95.15 | survives |
+| 45 / 10 (new) | drive | 55.68 | 3.13 | 86.11 | survives |
+
+On the shipped-default rig check, resting penetration more than halves: **0.83 cm**,
+against 1.90 at entry 028's constants.
+
+**The trade was made deliberately and is a real cost.** Peak penetration on the passive
+impact transient gets worse, 18.89 → 47.95 cm. A transient the rig recovers from beats a
+divergence it does not, and O-06 already classifies peak penetration as a quality problem
+rather than a stability one — but this is the first shipped change that makes O-06 worse
+on purpose.
+
+Runner-up was 15 / 2 (peak 49.58 / 38.25, restPen 1.24 / 3.99). Rejected by the rule on
+resting penetration under load, and independently unattractive: ζ = 2 is underdamped for
+contact, and at 45 Hz that same ζ is what died at 3.88 s in the ceiling ladder below.
+
+### The actuation ceiling — and a correction
+
+At the *interim* winner 45/2, full-amplitude babble diverged at 3.88 s with the authored
+muscle strengths and 3.27 s with them pinned to 1, and I concluded from that pair alone
+that "full-amplitude actuation is bounded by actuation, not contact stiffness — no contact
+constant can fix it."
+
+**That was wrong, and re-measuring at the real winner is what caught it.** At 45/10:
+
+| amplitude | strengths | maxPen | restPen | 12 s result |
+|---|---|---|---|---|
+| 30% | authored | 29.45 | 2.04 | survives |
+| 30% | pinned to 1 | 11.18 | 1.30 | survives |
+| 60% | authored | 41.01 | 1.90 | survives |
+| 60% | pinned to 1 | 26.66 | 1.81 | survives |
+| 100% | authored | 62.29 | 3.01 | **survives** |
+| 100% | pinned to 1 | 11.34 | 1.75 | survives |
+
+The damping ratio, not the actuation, was the binding constraint. `ζ = 10` survives full
+amplitude where `ζ = 2` at the same stiffness lasted under four seconds.
+
+### X-08, now quantified
+
+The authored muscle strengths cost real contact quality at every amplitude, and the gap
+widens with load:
+
+| amplitude | authored maxPen | pinned to 1 | ratio |
+|---|---|---|---|
+| 30% | 29.45 | 11.18 | 2.6× |
+| 60% | 41.01 | 26.66 | 1.5× |
+| 100% | 62.29 | 11.34 | **5.5×** |
+
+So entry 027's 0.5×–5.0× spread no longer *destabilises* at these constants, but it does
+degrade penetration by up to 5.5× under full load. X-08 stays open, downgraded from a
+suspected stability risk to a measured quality cost.
+
+### Two things this surfaced that were not being looked for
+
+**The joint-stop stiffness gap has nearly closed.** `ContactHertz` is clamped internally to
+`0.25/SubstepDt`, which at the shipped 1/240 is exactly 60 Hz. `JointLimitHertz` defaults to
+60 — it was *already sitting on that ceiling*, which nothing recorded. Its comment claims
+joint stops are "higher than ContactHertz on purpose"; that was a 4× gap and is now 1.33×,
+with no headroom left to restore it. Buying more requires a smaller `PhysicsSubstepDt`.
+Filed as **O-13**.
+
+**A late passive transient appeared.** The 50 s confirmation shows peak penetration
+climbing mid-run rather than being set at impact: 23.72 cm through t = 20 s, then 47.95 by
+t = 30 s, with the torso ending higher (95.15) than it sat for most of the run. The old
+constant was flat at 18.89 throughout. It recovers and never diverges, but a passive rig
+should be monotonically calmer, not louder at t = 25 s. **Not explained.** Filed as
+**O-14**.
+
+### What this does NOT mean
+
+- **Torque babble is not a policy.** Independent uniform draws on all 68 DOFs every 1/60 s,
+  with no temporal correlation, is harsher than anything a trained policy emits — and
+  harsher than a physical actuator could do, which is really a restatement of X-02 (no
+  actuator model; torque is applied instantly). It is a defensible stress test and a rough
+  stand-in for early PPO exploration. It is not evidence about trained behaviour.
+- **O-08 is still open.** Surviving actuation is not standing. Nothing here rewards, or
+  even measures, staying upright.
+- **Only two constants moved.** `Slop`, `Iterations`, `GlobalIterations`, `Cfm`, friction
+  and the limb-collision and joint-limit constants were all held fixed, so this is a fit of
+  the two values O-07 names and not a joint optimisation. Several of them are now fitted
+  around a different `ContactHertz` than they were chosen with.
+- **The rig-check ablation table is no longer comparable to entries 026 and 028.** Its rows
+  track the shipped defaults by design, so changing `ContactHertz` moved every one of them.
+  Most of the ablations now diverge earlier, which is expected — they lack the mechanisms
+  that make 45 Hz survivable — but the numbers in those two entries should not be read
+  against the numbers this test prints today.

@@ -157,10 +157,40 @@ public:
     UFUNCTION(BlueprintCallable, Category="MassMuscleProfile")
     void InitializeFromSkeletalMesh(USkeletalMesh* InSkeletalMesh);
 
+    virtual void PostLoad() override;
+
     void NotifyMassChange()
     {
         MarkPackageDirty();
     }
+
+    /**
+     * Recomputes every entry's BoneIndex from its BoneName against the current
+     * SkeletalMesh, and returns true if anything actually moved.
+     *
+     * BoneIndex used to be write-only: InitializeFromSkeletalMesh set it and
+     * nothing ever read it, so re-importing a mesh with bones added, removed or
+     * reordered left every stored index silently wrong with no symptom. It is
+     * now the lookup key (see FindBoneByIndex), so it has to be right -- which
+     * is the point: a field that is read is a field that gets maintained.
+     * Entries whose bone no longer exists resolve to INDEX_NONE, which
+     * FindBoneByIndex refuses to match rather than treating as "first entry".
+     */
+    bool SyncBoneIndices();
+
+    /**
+     * Returns the Mass[] slot for a REFERENCE-SKELETON bone index, or INDEX_NONE.
+     * Prefer this over FindBoneByName: it compares int32s instead of FNames, and
+     * callers building against a skeleton already hold the index.
+     */
+    int32 FindBoneByIndex(int32 InBoneIndex) const
+    {
+        if (InBoneIndex == INDEX_NONE) return INDEX_NONE;
+        return Mass.IndexOfByPredicate(
+            [&](const FMassMuscleDataMass& M){ return M.BoneIndex == InBoneIndex; });
+    }
+
+    /** Name-keyed fallback, for callers with no reference skeleton to resolve against. */
     int32 FindBoneByName(FName InName) const
     {
         return Mass.IndexOfByPredicate(

@@ -25,6 +25,38 @@ bool UMassMuscleProfileAssetMuscle::EnsureMuscleCurvesInitialized()
     return bUpdatedAnyMuscle;
 }
 
+void UMassMuscleProfileAssetMass::PostLoad()
+{
+    Super::PostLoad();
+    // Repair on load rather than on save: an asset saved before BoneIndex was
+    // read by anything carries whatever was there at authoring time, and every
+    // consumer now keys off it. Deliberately does NOT MarkPackageDirty -- a
+    // repair that only restores the derived field costs nothing to redo next
+    // load, and dirtying every asset on open is worse than recomputing.
+    SyncBoneIndices();
+}
+
+bool UMassMuscleProfileAssetMass::SyncBoneIndices()
+{
+    if (!SkeletalMesh)
+    {
+        return false;
+    }
+
+    const FReferenceSkeleton& RefSkeleton = SkeletalMesh->GetRefSkeleton();
+    bool bChanged = false;
+    for (FMassMuscleDataMass& Entry : Mass)
+    {
+        const int32 Resolved = RefSkeleton.FindBoneIndex(Entry.BoneName);
+        if (Entry.BoneIndex != Resolved)
+        {
+            Entry.BoneIndex = Resolved;
+            bChanged = true;
+        }
+    }
+    return bChanged;
+}
+
 void UMassMuscleProfileAssetMass::InitializeFromSkeletalMesh(USkeletalMesh* InSkeletalMesh)
 {
     if (!InSkeletalMesh)
@@ -44,7 +76,7 @@ void UMassMuscleProfileAssetMass::InitializeFromSkeletalMesh(USkeletalMesh* InSk
     {
         FMassMuscleDataMass NewEntry;
         NewEntry.BoneName = RefSkeleton.GetBoneName(i);
-        NewEntry.BoneIndex = RefSkeleton.FindBoneIndex(NewEntry.BoneName);
+        NewEntry.BoneIndex = i; // one entry per bone, in bone order -- FindBoneIndex(GetBoneName(i)) is just i
         Mass.Add(NewEntry);
     }
 }
