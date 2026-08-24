@@ -1160,21 +1160,44 @@ private:
 	TArray<FVector> BallU_u3Acc;
 
 	// ---- Impulse-dynamics scratch (see the velocity-level contact section) ----
-	// ImpI is body-major/env-minor like the other accumulators; the rest are
-	// per-body/per-DOF for ONE env, since impulse queries are resolved one
-	// contact at a time. Mutable so the const query
-	// SolveImpulseResponse can use them without forcing callers to hold a
-	// non-const solver just to ask a question.
+	// ImpI is body-major/env-minor, sized once per ComputeArticulatedInertias
+	// call and safe to read concurrently across envs (each env only ever
+	// reads/writes its own slice, and it is never resized during a parallel
+	// section) -- it does NOT need thread-local treatment.
+	//
+	// ImpP/ImpU/ImpUVec/DVScratch/DQScratch/JointImpScratch are different: true
+	// per-call SCRATCH that SolveImpulseResponse (and its wrapper functions
+	// below -- ImpulseResponseAtPoint, JointImpulseResponse, ApplyJointImpulse,
+	// BallJointImpulseResponse, ApplyBallJointImpulse, and ApplyJointDamping's
+	// own SolveScaleAndApply) overwrite on every call. Until 2026-08-25 these
+	// were plain instance members, sized for exactly ONE env and reused
+	// sequentially across a caller's own `for (Env)` loop -- which is
+	// EXACTLY what forced both ApplyJointDamping's and (per this class's own
+	// comment on the global contact solve, CreatureGroundContact.h) the
+	// ground-contact solver's per-env loops to stay single-threaded: two envs
+	// running concurrently would both scribble into the same arrays.
+	// `static thread_local` (not per-instance batch-sizing like ImpI's) is the
+	// fix -- each worker thread gets its own private copy, so two envs
+	// processed concurrently on different threads never collide, while a
+	// single thread's own sequential calls (across multiple envs, or across
+	// multiple SEPARATE FCreatureABASolver instances, e.g. the Live driver's
+	// vs. a Ragdoll/Visualizer actor's own -- all sharing the same worker
+	// threads) keep reusing the same already-correctly-sized buffer exactly
+	// as before, since every call already does its own `.SetNum()` before use.
+	// `static` means these can no longer be `mutable` (mutable only applies to
+	// non-static data members) -- unnecessary anyway, since a const member
+	// function can always touch a class's static state.
 	TArray<FSpatialInertia> ImpI;
-	mutable TArray<FSpatialVec> ImpP;    // impulse bias per body
-	mutable TArray<FSpatialVec> ImpU;    // ball: u3 in .Ang | revolute: (Uu, D, 0) in .Ang
-	mutable TArray<FSpatialVec> ImpUVec; // revolute: the full U spatial vector
-	TArray<FSpatialVec> DVScratch;
-	TArray<float> DQScratch;
+	static inline thread_local TArray<FSpatialVec> ImpP;    // impulse bias per body
+	static inline thread_local TArray<FSpatialVec> ImpU;    // ball: u3 in .Ang | revolute: (Uu, D, 0) in .Ang
+	static inline thread_local TArray<FSpatialVec> ImpUVec; // revolute: the full U spatial vector
+	static inline thread_local TArray<FSpatialVec> DVScratch;
+	static inline thread_local TArray<float> DQScratch;
 	// Per-DOF joint-space impulse input for SolveImpulseResponse. Kept as a
-	// persistent member (rather than a local) so the joint-limit rows, which
-	// call this once per DOF per iteration, don't allocate in the solve loop.
-	TArray<float> JointImpScratch;
+	// persistent (now thread-local) buffer rather than a local so the
+	// joint-limit rows, which call this once per DOF per iteration, don't
+	// allocate in the solve loop.
+	static inline thread_local TArray<float> JointImpScratch;
 	// Lock set of the CURRENT factorization, set by ComputeArticulatedInertias
 	// and read by SolveImpulseResponse so the two agree about which joints are
 	// welded. Non-owning; valid only until the next ComputeArticulatedInertias.
@@ -2390,17 +2413,26 @@ public:
 		const int32 NumDOF = FMath::Max(1, Topo.NumDOF);
 		const int32 NumEnvs = Batch.GetNumEnvs();
 
-		DVScratch.SetNum(NumBodies, EAllowShrinking::No);
-		DQScratch.SetNum(NumDOF, EAllowShrinking::No);
-		JointImpScratch.SetNumZeroed(NumDOF, EAllowShrinking::No);
-
 		// Solve once for a unit joint-space impulse, then scale that same response
 		// by whatever magnitude achieves the requested velocity change and apply
 		// it. One tree pass, not the two that JointImpulseResponse followed by
 		// ApplyJointImpulse would cost.
+		//
+		// Sizing DVScratch/DQScratch/JointImpScratch happens HERE, per call,
+		// rather than once before the env loop the way an earlier version of
+		// this function did -- now that the env loop below is a ParallelFor
+		// (see its own comment) and these three are `static thread_local` (see
+		// their declaration), a one-time size-before-the-loop would only have
+		// sized the CALLING thread's copy; every OTHER worker thread that
+		// picks up an env task needs its own copy sized before first use too.
+		// Cheap: EAllowShrinking::No makes this a no-op once a given thread's
+		// copy is already the right size, which is every call after its first.
 		auto SolveScaleAndApply = [&](int32 Env, int32 DOFOffset, int32 NumComponents,
 		                              const FVector& Dir, float TargetDelta) -> bool
 		{
+			DVScratch.SetNum(NumBodies, EAllowShrinking::No);
+			DQScratch.SetNum(NumDOF, EAllowShrinking::No);
+			JointImpScratch.SetNumZeroed(NumDOF, EAllowShrinking::No);
 			for (int32 d = 0; d < NumDOF; ++d) { DQScratch[d] = 0.0f; JointImpScratch[d] = 0.0f; }
 			if (NumComponents == 1)
 			{
@@ -2448,7 +2480,21 @@ public:
 			return true;
 		};
 
-		for (int32 Env = 0; Env < NumEnvs; ++Env)
+		// Parallelized across envs, same idiom as Step()'s own passes (see its
+		// class comment): one task per env, no synchronization needed because
+		// SolveScaleAndApply only ever touches Batch slots this Env owns
+		// (Batch.BodyIndex/DOFIndex always fold Env into the offset) and its
+		// own scratch (DVScratch/DQScratch/JointImpScratch, and transitively
+		// ImpP/ImpU/ImpUVec inside SolveImpulseResponse) is now
+		// `static thread_local` -- see those declarations' comment for why
+		// this was UNSAFE before 2026-08-25 (this loop used to be sequential
+		// specifically because of this) and confirmed safe now. Measured
+		// before this change: ~220-260ms for this one function at 256 envs,
+		// vs. ~7-8ms for Step()'s own 5-pass ABA integration on the same
+		// batch -- this loop was doing whole-tree impulse-response solves
+		// (SolveImpulseResponse: one backward + one forward tree pass per
+		// damped joint per env) fully single-threaded.
+		ParallelFor(NumEnvs, [&](int32 Env)
 		{
 			for (int32 Body = 1; Body < NumBodies; ++Body)
 			{
@@ -2487,7 +2533,7 @@ public:
 					SolveScaleAndApply(Env, DOFOffset, 3, W / Speed, -Passive.DampFrac * Speed);
 				}
 			}
-		}
+		});
 	}
 
 };
