@@ -151,7 +151,22 @@ void AMutoRLVisualizerActor::Tick(float DeltaTime)
 
 	if (!Policy)
 	{
+		// Previously a silent no-op every frame -- if StartTraining() never
+		// ran or failed before Policy got created, this actor sits doing
+		// NOTHING (not even UpdateMeshPose, so the mesh never gets its FIRST
+		// pose) with zero trace of why. Logged once (not every frame) via
+		// bLoggedNullPolicyWarning.
+		if (!bLoggedNullPolicyWarning)
+		{
+			bLoggedNullPolicyWarning = true;
+			UE_LOG(LogTemp, Warning, TEXT("[AS-TRACE] AMutoRLVisualizerActor: Tick() no-op -- Policy is null (StartTraining likely never ran or failed before reaching MakePolicy)."));
+		}
 		return;
+	}
+	if (bLoggedNullPolicyWarning)
+	{
+		bLoggedNullPolicyWarning = false;
+		UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLVisualizerActor: Policy now valid, Tick() ticking normally."));
 	}
 
 	// Periodic, non-blocking snapshot refresh (see class comment) — never
@@ -198,6 +213,20 @@ void AMutoRLVisualizerActor::Tick(float DeltaTime)
 	}
 
 	UpdateMeshPose();
+
+	// Agent+physics-tick heartbeat -- shares the "[AS-TRACE]" prefix and
+	// roughly-once-a-second cadence with FAgentSolverViewportClient's
+	// mesh-show heartbeat and AMutoRagdollVisualizerActor's own physics-tick
+	// one, so if the embedded viewport shows a static mesh with this source
+	// selected, the log directly answers "is inference+physics even
+	// stepping": TorsoZ should be visibly changing between consecutive lines.
+	static constexpr int32 TraceHeartbeatInterval = 60;
+	if (++TraceHeartbeatCounter >= TraceHeartbeatInterval)
+	{
+		TraceHeartbeatCounter = 0;
+		const float TorsoZ = (float)Batch.GetBodyPos(0, 0).Z;
+		UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLVisualizerActor: agent+physics-tick heartbeat -- torsoZ=%.2f."), TorsoZ);
+	}
 }
 
 void AMutoRLVisualizerActor::RefreshNetworkSnapshot(bool bBlockUntilAvailable)

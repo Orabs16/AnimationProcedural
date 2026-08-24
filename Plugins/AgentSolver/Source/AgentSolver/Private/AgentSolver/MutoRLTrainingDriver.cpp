@@ -62,7 +62,25 @@ void UMutoRLTrainingEnvironment::GatherAgentReward_Implementation(float& OutRewa
 	AMutoRLTrainingDriver* Driver = GetTypedOuter<AMutoRLTrainingDriver>();
 	check(Driver);
 	const int32 EnvIndex = Driver->GetEnvIndexForAgent(AgentId);
-	OutReward = CreatureRLEnvironment::ComputeReward(Driver->Batch, EnvIndex, Driver->Config, Driver->ContactPoints, Driver->ContactStates, Driver->Batch.GetNumEnvs());
+	float TorsoHeightBonus = 0.0f;
+	float EnergyConsumptionMalus = 0.0f;
+	float MusclesUseMalus = 0.0f;
+	OutReward = CreatureRLEnvironment::ComputeReward(Driver->Batch, EnvIndex, Driver->Config, Driver->ContactPoints, Driver->ContactStates, Driver->Batch.GetNumEnvs(),
+		&TorsoHeightBonus, &EnergyConsumptionMalus, &MusclesUseMalus);
+
+	// See AverageReward's comment -- slow-moving EMA (alpha small on purpose:
+	// this runs once per agent per step, i.e. up to NumEnvs samples per
+	// training step, so a large alpha would make the UI readout jitter with
+	// the per-agent noise instead of showing a trend).
+	static constexpr float RewardEmaAlpha = 0.01f;
+	const float PreviousAverage = Driver->AverageReward.load(std::memory_order_relaxed);
+	Driver->AverageReward.store(FMath::Lerp(PreviousAverage, OutReward, RewardEmaAlpha), std::memory_order_relaxed);
+
+	// Same EMA treatment for the Reward Settings pane's visualization graphs
+	// -- see LastTorsoHeightBonus/LastEnergyConsumptionMalus/LastMusclesUseMalus.
+	Driver->LastTorsoHeightBonus.store(FMath::Lerp(Driver->LastTorsoHeightBonus.load(std::memory_order_relaxed), TorsoHeightBonus, RewardEmaAlpha), std::memory_order_relaxed);
+	Driver->LastEnergyConsumptionMalus.store(FMath::Lerp(Driver->LastEnergyConsumptionMalus.load(std::memory_order_relaxed), EnergyConsumptionMalus, RewardEmaAlpha), std::memory_order_relaxed);
+	Driver->LastMusclesUseMalus.store(FMath::Lerp(Driver->LastMusclesUseMalus.load(std::memory_order_relaxed), MusclesUseMalus, RewardEmaAlpha), std::memory_order_relaxed);
 }
 
 void UMutoRLTrainingEnvironment::GatherAgentCompletion_Implementation(ELearningAgentsCompletion& OutCompletion, const int32 AgentId)
@@ -127,6 +145,8 @@ void UMutoRLTrainingEnvironment::ResetAgentEpisode_Implementation(const int32 Ag
 	// comment). Per-env, so other envs sharing this same array are
 	// unaffected.
 	CreatureRLEnvironment::ClearContactStatesForEnv(Driver->ContactStates, Driver->ContactPoints.Num(), EnvIndex, Driver->Batch.GetNumEnvs());
+
+	Driver->EpisodeCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 // ================================ AMutoRLTrainingDriver ================================
@@ -311,6 +331,22 @@ void AMutoRLTrainingDriver::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// BeginPlay only ever runs when a world is actually starting play (PIE or
+	// packaged game) -- never for the plain editor world, which never calls
+	// BeginPlay on its placed actors at all. So it's always correct to clear
+	// this here: a stray direct StartTraining() call against the EDITOR-WORLD
+	// source object (e.g. the pre-IsPIERunning()-gating "Play button running
+	// training against the editor world" bug) would otherwise leave
+	// bStartTrainingCalled stuck true on that object for the rest of the
+	// editor session -- and since PIE duplicates that object's CURRENT
+	// in-memory state at the start of every subsequent session, every future
+	// PIE run would inherit the stale flag, hit the guard in StartTraining(),
+	// and silently return with no Trainer ever created (TrainingStepCount
+	// stuck at 0, IsTrainingActive() permanently false, Stop button never
+	// enabling) -- with nothing to naturally reset it, since the poisoned
+	// editor-world object's own BeginPlay never fires again to clear it.
+	bStartTrainingCalled = false;
+
 	if (bAutoStartOnBeginPlay)
 	{
 		StartTraining();
@@ -400,6 +436,10 @@ void AMutoRLTrainingDriver::StartTraining()
 	Config.UprightWeight = UprightWeight;
 	Config.BalanceWeight = BalanceWeight;
 	Config.TorquePenaltyWeight = TorquePenaltyWeight;
+	Config.RewardHeightTarget = RewardHeightTarget;
+	Config.RewardHeightMultiplier = RewardHeightMultiplier;
+	Config.RewardEnergyConsumptionMultiplier = RewardEnergyConsumptionMultiplier;
+	Config.RewardMusclesUseMultiplier = RewardMusclesUseMultiplier;
 
 	StandingTorsoPos = FVector(0.0f, 0.0f, Config.TargetTorsoHeight);
 	ResetStream = FRandomStream(ResetRandomSeed);
@@ -631,10 +671,12 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 	// writes Batch.JointTorque). Locked because this both reads AND
 	// (via PPO's periodic weight updates) writes the same live network
 	// objects AMutoRLVisualizerActor::Tick() reads on the game thread.
+	const double RunTrainingStartTime = FPlatformTime::Seconds();
 	{
 		FScopeLock Lock(&NetworkAccessLock);
 		Trainer->RunTraining(TrainingSettings, GameSettings);
 	}
+	const double RunTrainingSeconds = FPlatformTime::Seconds() - RunTrainingStartTime;
 
 	// RunTraining() calls BeginTraining() whenever !IsTraining() — including
 	// once training has legitimately finished (TrainingSettings.NumberOfIterations
@@ -648,9 +690,31 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 
 	// Advance the physics using the actions just written, internally
 	// substepped for contact stability (see PhysicsSubstepDt's comment).
-	// Batch/Solver are never touched by anything other than this loop (the
-	// visualizer owns its own separate Batch/Solver), so no lock needed here.
+	// Batch/Solver are mutated here and nowhere else in this driver's own
+	// game/training-thread logic (the visualizer owns its own separate
+	// Batch/Solver) -- but the control panel's viewport now reads Batch from
+	// the game thread for live display, under the SAME TrainingStepLock this
+	// whole function already holds (see StepLock above and GetTrainingStepLock's
+	// comment), which is what actually makes that safe.
+	const double StepPhysicsStartTime = FPlatformTime::Seconds();
 	StepPhysicsSubstepped(FixedDt);
+	const double StepPhysicsSeconds = FPlatformTime::Seconds() - StepPhysicsStartTime;
+
+	// Agent+physics-tick heartbeat -- shares the "[AS-TRACE]" prefix with the
+	// embedded viewport's own mesh-show heartbeat and the Ragdoll/Visualizer
+	// physics-tick heartbeats, so all three sources' traces read the same
+	// way. Logged every step (not throttled to once/second like the others)
+	// because this runs on the BACKGROUND training thread, where a step is
+	// typically the slow, infrequent one (seconds, not milliseconds) rather
+	// than a 30-60fps tick -- the whole point here is the timing breakdown:
+	// RunTrainingSeconds is Learning Agents' own inference+PPO-sync cost
+	// (dominated by the Python subprocess round-trip when the replay buffer
+	// syncs), StepPhysicsSeconds is this project's own physics solver cost --
+	// separates "training is slow because of Learning Agents/Python" from
+	// "training is slow because of our own physics step" instead of leaving
+	// both bundled into one unexplained per-step wall-clock number.
+	UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLTrainingDriver: agent+physics-tick heartbeat -- step=%d runTrainingMs=%.1f stepPhysicsMs=%.1f torsoZ(env0)=%.2f."),
+		TrainingStepCount.load(std::memory_order_relaxed) + 1, RunTrainingSeconds * 1000.0, StepPhysicsSeconds * 1000.0, (float)Batch.GetBodyPos(0, 0).Z);
 
 	// See AutoSaveIntervalSeconds's comment: this is the only autosave that
 	// can protect an unattended run against a hard engine crash (a NaN
@@ -665,6 +729,7 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 		}
 	}
 
+	TrainingStepCount.fetch_add(1, std::memory_order_relaxed);
 	return true;
 }
 
@@ -739,6 +804,22 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 	const bool bWantResidualLog = LogSolverResidualEverySubsteps > 0 && bUseGlobalConstraintSolve;
 	const bool bWantWatchLog = WatchContactBody != INDEX_NONE || WatchJointLimitDOF != INDEX_NONE;
 
+	// [AS-TRACE] phase-timing accumulators -- see this function's own
+	// heartbeat log below. Isolates which of the 4 per-substep phases
+	// (ABA integration, joint damping, saturated-joint-lock rebuild, ground
+	// contact + joint limit + limb collision resolution) actually dominates
+	// the ~500-700ms/step cost the control panel's own [AS-TRACE] heartbeat
+	// (AMutoRLTrainingDriver: agent+physics-tick heartbeat) already showed
+	// was the real training bottleneck (Learning Agents' own side was only
+	// ~3-5ms/step) -- summed across every substep in this one call, not
+	// reset between calls, so this function's log entry reports one full
+	// RunOneTrainingStep()'s worth of physics cost, matching the granularity
+	// that heartbeat already logs at.
+	double StepSeconds = 0.0;
+	double DampingSeconds = 0.0;
+	double WeldLockSeconds = 0.0;
+	double ContactSeconds = 0.0;
+
 	for (int32 Substep = 0; Substep < NumSubsteps; ++Substep)
 	{
 		// Contact is resolved AFTER integration: an impulse corrects the
@@ -748,7 +829,11 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		// confusion and one reason for dropping it.)
 		//
 		// Resolving inside this loop means contact is solved once per SUBSTEP.
-		Solver.Step(Batch, ActualSubstepDt, Gravity);
+		{
+			const double T0 = FPlatformTime::Seconds();
+			Solver.Step(Batch, ActualSubstepDt, Gravity);
+			StepSeconds += FPlatformTime::Seconds() - T0;
+		}
 
 		// Passive joint damping, BEFORE contact so contact solves against the
 		// damped velocities rather than fighting them. It is a velocity-level
@@ -756,7 +841,11 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		// tried and measurably reverses joints), so it belongs on this side of
 		// Step() alongside contact, not inside the force pass. Returns immediately
 		// when no joint has a damping time constant.
-		Solver.ApplyJointDamping(Batch, ActualSubstepDt);
+		{
+			const double T0 = FPlatformTime::Seconds();
+			Solver.ApplyJointDamping(Batch, ActualSubstepDt);
+			DampingSeconds += FPlatformTime::Seconds() - T0;
+		}
 
 		// Weld set for the factorization, rebuilt every substep because which
 		// joints are saturated is per-substep, per-env state. Built BEFORE
@@ -766,7 +855,9 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		int32 LockStride = 0;
 		if (bWeldSaturatedJoints)
 		{
+			const double T0 = FPlatformTime::Seconds();
 			Solver.BuildSaturatedJointLocks(Batch, WeldSaturationMarginDeg, SaturatedJointLocks);
+			WeldLockSeconds += FPlatformTime::Seconds() - T0;
 			Locks = SaturatedJointLocks.GetData();
 			LockStride = CurrentNumEnvs;
 		}
@@ -776,12 +867,16 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		DebugLog.WatchBody = WatchContactBody;
 		DebugLog.WatchDOF = WatchJointLimitDOF;
 
-		CreatureGroundContact::ResolveGroundContactImpulses(
-			Batch, Batch.GetTopology(), ContactPoints, ContactParams,
-			Solver, ActualSubstepDt, ContactImpulseCache, &ContactStates, &LimitParams,
-			LimbCollisionPairs, &LimbCollisionParams,
-			(bLogThisSubstep || bWantWatchLog) ? &DebugLog : nullptr,
-			Locks, LockStride);
+		{
+			const double T0 = FPlatformTime::Seconds();
+			CreatureGroundContact::ResolveGroundContactImpulses(
+				Batch, Batch.GetTopology(), ContactPoints, ContactParams,
+				Solver, ActualSubstepDt, ContactImpulseCache, &ContactStates, &LimitParams,
+				LimbCollisionPairs, &LimbCollisionParams,
+				(bLogThisSubstep || bWantWatchLog) ? &DebugLog : nullptr,
+				Locks, LockStride);
+			ContactSeconds += FPlatformTime::Seconds() - T0;
+		}
 
 		if (bLogThisSubstep && DebugLog.GlobalResidualPerIteration.Num() > 0)
 		{
@@ -790,6 +885,9 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 				DebugLog.GlobalNumRows, R[0], R[R.Num() / 2], R.Last(), R.Num());
 		}
 	}
+
+	UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLTrainingDriver::StepPhysicsSubstepped: %d substeps -- stepMs=%.1f dampingMs=%.1f weldLockMs=%.1f contactMs=%.1f (contact = ground+jointLimit+limbCollision combined)."),
+		NumSubsteps, StepSeconds * 1000.0, DampingSeconds * 1000.0, WeldLockSeconds * 1000.0, ContactSeconds * 1000.0);
 }
 
 // KNOWN STRUCTURAL HAZARD (2026-08-12) — read before touching this loop.
@@ -842,6 +940,17 @@ void AMutoRLTrainingDriver::RunTrainingThreadLoop()
 
 void AMutoRLTrainingDriver::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	StopTrainingInternal();
+	Super::EndPlay(EndPlayReason);
+}
+
+void AMutoRLTrainingDriver::StopTraining()
+{
+	StopTrainingInternal();
+}
+
+void AMutoRLTrainingDriver::StopTrainingInternal()
+{
 	bStopTrainingThreadRequested = true;
 	if (TrainingThreadFuture.IsValid())
 	{
@@ -857,7 +966,15 @@ void AMutoRLTrainingDriver::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		Trainer->EndTraining();
 	}
-	Super::EndPlay(EndPlayReason);
+
+	// Safe here specifically because the thread is already joined (the Wait()
+	// above) -- there is no in-flight StartTraining() call this could race
+	// with, unlike the re-entrancy window this flag guards against DURING a
+	// call. Without this, a manual Stop (the toolbar's Stop button) followed
+	// by a manual Start in the SAME PIE session would hit the "already
+	// started, ignoring" guard forever -- StartTraining() would never run
+	// again for this actor instance until a fresh PIE session.
+	bStartTrainingCalled = false;
 }
 
 FString AMutoRLTrainingDriver::GetSnapshotDirectory() const
@@ -918,9 +1035,9 @@ void AMutoRLTrainingDriver::SaveTrainedNetworksToAssets()
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: no Policy yet — start training first."));
 		return;
 	}
-	if (!EncoderNetworkAsset && !PolicyNetworkAsset && !DecoderNetworkAsset)
+	if (!SaveEncoderNetworkAsset && !SavePolicyNetworkAsset && !SaveDecoderNetworkAsset)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: no network assets assigned (EncoderNetworkAsset/PolicyNetworkAsset/DecoderNetworkAsset) — nothing to do."));
+		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: no network assets assigned (SaveEncoderNetworkAsset/SavePolicyNetworkAsset/SaveDecoderNetworkAsset) — nothing to do."));
 		return;
 	}
 
@@ -928,17 +1045,17 @@ void AMutoRLTrainingDriver::SaveTrainedNetworksToAssets()
 	// AMutoRLVisualizerActor's periodic refresh share — avoids reading a
 	// network mid-update.
 	FScopeLock Lock(&NetworkAccessLock);
-	if (EncoderNetworkAsset)
+	if (SaveEncoderNetworkAsset)
 	{
-		Policy->GetEncoderNetworkAsset()->SaveNetworkToAsset(EncoderNetworkAsset);
+		Policy->GetEncoderNetworkAsset()->SaveNetworkToAsset(SaveEncoderNetworkAsset);
 	}
-	if (PolicyNetworkAsset)
+	if (SavePolicyNetworkAsset)
 	{
-		Policy->GetPolicyNetworkAsset()->SaveNetworkToAsset(PolicyNetworkAsset);
+		Policy->GetPolicyNetworkAsset()->SaveNetworkToAsset(SavePolicyNetworkAsset);
 	}
-	if (DecoderNetworkAsset)
+	if (SaveDecoderNetworkAsset)
 	{
-		Policy->GetDecoderNetworkAsset()->SaveNetworkToAsset(DecoderNetworkAsset);
+		Policy->GetDecoderNetworkAsset()->SaveNetworkToAsset(SaveDecoderNetworkAsset);
 	}
 	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: saved trained networks to network assets."));
 }
@@ -950,24 +1067,24 @@ void AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets()
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets: no Policy yet — start training first."));
 		return;
 	}
-	if (!EncoderNetworkAsset && !PolicyNetworkAsset && !DecoderNetworkAsset)
+	if (!LoadEncoderNetworkAsset && !LoadPolicyNetworkAsset && !LoadDecoderNetworkAsset)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets: no network assets assigned (EncoderNetworkAsset/PolicyNetworkAsset/DecoderNetworkAsset) — nothing to do."));
+		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets: no network assets assigned (LoadEncoderNetworkAsset/LoadPolicyNetworkAsset/LoadDecoderNetworkAsset) — nothing to do."));
 		return;
 	}
 
 	FScopeLock Lock(&NetworkAccessLock);
-	if (EncoderNetworkAsset)
+	if (LoadEncoderNetworkAsset)
 	{
-		Policy->GetEncoderNetworkAsset()->LoadNetworkFromAsset(EncoderNetworkAsset);
+		Policy->GetEncoderNetworkAsset()->LoadNetworkFromAsset(LoadEncoderNetworkAsset);
 	}
-	if (PolicyNetworkAsset)
+	if (LoadPolicyNetworkAsset)
 	{
-		Policy->GetPolicyNetworkAsset()->LoadNetworkFromAsset(PolicyNetworkAsset);
+		Policy->GetPolicyNetworkAsset()->LoadNetworkFromAsset(LoadPolicyNetworkAsset);
 	}
-	if (DecoderNetworkAsset)
+	if (LoadDecoderNetworkAsset)
 	{
-		Policy->GetDecoderNetworkAsset()->LoadNetworkFromAsset(DecoderNetworkAsset);
+		Policy->GetDecoderNetworkAsset()->LoadNetworkFromAsset(LoadDecoderNetworkAsset);
 	}
 	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: loaded trained networks from network assets."));
 }

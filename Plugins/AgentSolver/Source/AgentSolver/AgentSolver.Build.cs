@@ -70,6 +70,29 @@ public class AgentSolver : ModuleRules
 			// this dependency — and everything that uses it — must stay out of
 			// non-editor targets.
 			PrivateDependencyModuleNames.Add("MassMuscleProfile");
+
+			// UIControls/SAgentSolverControlPanel.h + AgentSolver.cpp's Window-menu
+			// registration are WITH_EDITOR-gated (see those files) for the same
+			// reason as above — all of these are Editor-type modules and must
+			// stay out of non-editor targets too. AdvancedPreviewScene/InputCore
+			// back the embedded SEditorViewport (FAgentSolverViewportClient),
+			// PropertyEditor backs the category-filtered IDetailsView tabs —
+			// same set MassMuscleProfile's own viewport+details panels need.
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"UnrealEd",
+					"ToolMenus",
+					"EditorFramework",
+					"AdvancedPreviewScene",
+					"PropertyEditor",
+					"InputCore",
+					// FLevelEditorModule::GetFirstActiveViewport(), used to point
+					// GEditor->RequestPlaySession's DestinationSlateViewport at the
+					// level editor's own active viewport instead of a new window.
+					"LevelEditor",
+				}
+				);
 		}
 
 

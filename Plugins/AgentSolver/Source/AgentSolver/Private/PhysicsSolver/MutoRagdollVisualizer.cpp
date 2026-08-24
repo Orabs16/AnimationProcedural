@@ -204,6 +204,21 @@ void AMutoRagdollVisualizerActor::Tick(float DeltaTime)
 	{
 		DrawStats();
 	}
+
+	// Physics-tick heartbeat -- shares the "[AS-TRACE]" prefix and roughly-
+	// once-a-second cadence with FAgentSolverViewportClient's mesh-show
+	// heartbeat, so if the embedded viewport shows a static mesh with this
+	// source selected, the log directly answers "is physics even stepping":
+	// bPaused/bDiverged explain a deliberate stop, otherwise TorsoZ should be
+	// visibly changing between consecutive heartbeat lines.
+	static constexpr int32 TraceHeartbeatInterval = 60;
+	if (++TraceHeartbeatCounter >= TraceHeartbeatInterval)
+	{
+		TraceHeartbeatCounter = 0;
+		const float TorsoZ = Topo.NumBodies > 0 ? (float)Batch.GetBodyPos(0, 0).Z : 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRagdollVisualizerActor: physics-tick heartbeat -- bPaused=%d bDiverged=%d simTime=%.2f torsoZ=%.2f."),
+			bPaused, bDiverged, SimTime, TorsoZ);
+	}
 }
 
 bool AMutoRagdollVisualizerActor::AdvancePhysics(int32 NumSubsteps)

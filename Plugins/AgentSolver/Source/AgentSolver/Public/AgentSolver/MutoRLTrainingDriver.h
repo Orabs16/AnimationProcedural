@@ -118,11 +118,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Muto RL")
 	virtual void StartTraining();
 
+	/**
+	 * Stops the background training thread and the Python trainer process
+	 * (same sequence EndPlay runs on PIE stop -- see StopTrainingInternal),
+	 * without destroying this actor. Lets a control panel/UI offer a "Stop"
+	 * button independent of stopping PIE. Safe to call if training was never
+	 * started or is already stopped (each step no-ops when there's nothing
+	 * to do). Resets bStartTrainingCalled (see StopTrainingInternal) so a
+	 * subsequent StartTraining() call in the SAME PIE session genuinely
+	 * restarts training instead of hitting the re-entrancy guard.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Muto RL")
+	void StopTraining();
+
 	/** Env index (row in Batch) for a given Learning Agents AgentId, or INDEX_NONE. */
 	int32 GetEnvIndexForAgent(int32 AgentId) const;
 
 	/** The trained policy, for AMutoRLVisualizerActor to share network weights with (read-only inference, no reinitialization). */
 	ULearningAgentsPolicy* GetPolicy() const { return Policy; }
+
+	/** True once StartTraining has set up a Trainer that is still actively training (see ULearningAgentsPPOTrainer::IsTraining). For UI status readouts. */
+	bool IsTrainingActive() const { return Trainer && Trainer->IsTraining(); }
 
 	/**
 	 * Writes the Policy's current Encoder/Policy/Decoder network weights to
@@ -136,7 +152,7 @@ public:
 	 * time once training has started; locks NetworkAccessLock the same way
 	 * the training thread and AMutoRLVisualizerActor's periodic refresh do.
 	 */
-	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Muto RL")
+	UFUNCTION(BlueprintCallable, Category = "Muto RL")
 	void SaveTrainedNetworks();
 
 	/**
@@ -147,13 +163,13 @@ public:
 	 * moment of freshly-initialized ones), set bLoadSnapshotOnStart=true
 	 * instead of calling this manually.
 	 */
-	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Muto RL")
+	UFUNCTION(BlueprintCallable, Category = "Muto RL")
 	void LoadTrainedNetworks();
 
 	/**
 	 * Copies the Policy's current Encoder/Policy/Decoder network weights into
-	 * EncoderNetworkAsset/PolicyNetworkAsset/DecoderNetworkAsset (see
-	 * ULearningAgentsNeuralNetwork::SaveNetworkToAsset) instead of the raw
+	 * SaveEncoderNetworkAsset/SavePolicyNetworkAsset/SaveDecoderNetworkAsset
+	 * (see ULearningAgentsNeuralNetwork::SaveNetworkToAsset) instead of the raw
 	 * snapshot files SaveTrainedNetworks writes. Unlike those files, these are
 	 * normal UDataAsset UAssets: assign them in the Details panel (create with
 	 * Content Browser -> Miscellaneous -> Learning Agents Neural Network) to
@@ -162,17 +178,19 @@ public:
 	 * left unassigned. Safe to call any time once training has started; takes
 	 * NetworkAccessLock like SaveTrainedNetworks.
 	 */
-	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Muto RL")
+	UFUNCTION(BlueprintCallable, Category = "Muto RL")
 	void SaveTrainedNetworksToAssets();
 
 	/**
-	 * Loads EncoderNetworkAsset/PolicyNetworkAsset/DecoderNetworkAsset into
-	 * the CURRENTLY LIVE Policy, hot-swapping its weights mid-training (see
-	 * ULearningAgentsNeuralNetwork::LoadNetworkFromAsset). Logs and does
+	 * Loads LoadEncoderNetworkAsset/LoadPolicyNetworkAsset/LoadDecoderNetworkAsset
+	 * into the CURRENTLY LIVE Policy, hot-swapping its weights mid-training
+	 * (see ULearningAgentsNeuralNetwork::LoadNetworkFromAsset). Logs and does
 	 * nothing for any of the three slots left unassigned, so partially-filled
-	 * asset references are safe to use. Counterpart to SaveTrainedNetworksToAssets.
+	 * asset references are safe to use. Deliberately a SEPARATE trio from the
+	 * Save* properties above -- so you can seed from one checkpoint and save
+	 * results to another without the two operations fighting over one asset.
 	 */
-	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Muto RL")
+	UFUNCTION(BlueprintCallable, Category = "Muto RL")
 	void LoadTrainedNetworksFromAssets();
 
 	/**
@@ -183,6 +201,35 @@ public:
 	 * same shared Policy from the game thread.
 	 */
 	FCriticalSection& GetNetworkAccessLock() { return NetworkAccessLock; }
+
+	/**
+	 * Guards Batch/Solver/ContactPoints/ContactStates against the background
+	 * training thread's StepPhysicsSubstepped call inside RunOneTrainingStep
+	 * -- until the UI control-panel viewport started reading Batch for live
+	 * display, nothing but that one loop ever touched them (see
+	 * RunOneTrainingStep's comment: "no lock needed here"), so this is the
+	 * first cross-thread reader and must take the SAME lock
+	 * RunOneTrainingStep already holds for its own unrelated reason (see
+	 * TrainingStepLock's comment), not a new one -- a second, independent
+	 * lock would not actually prevent a torn read of Batch mid-step.
+	 */
+	FCriticalSection& GetTrainingStepLock() { return TrainingStepLock; }
+
+	/** Running exponential moving average of GatherAgentReward's per-agent, per-step reward, across every agent. Written only by the background training thread (UMutoRLTrainingEnvironment::GatherAgentReward_Implementation); safe to read from the game thread for UI status without a lock (single-writer, and each store is one atomic float write). Not used by training itself -- diagnostic only. */
+	float GetAverageReward() const { return AverageReward.load(std::memory_order_relaxed); }
+
+	// ----- Reward-component EMAs, same single-writer/lock-free-read pattern as
+	// AverageReward above, for the Reward Settings pane's visualization graphs
+	// (see SAgentSolverControlPanel.h) -- diagnostic only, not used by training. -----
+	float GetLastTorsoHeightBonus() const { return LastTorsoHeightBonus.load(std::memory_order_relaxed); }
+	float GetLastEnergyConsumptionMalus() const { return LastEnergyConsumptionMalus.load(std::memory_order_relaxed); }
+	float GetLastMusclesUseMalus() const { return LastMusclesUseMalus.load(std::memory_order_relaxed); }
+
+	/** Total RunOneTrainingStep() calls that have completed since StartTraining -- Learning Agents doesn't expose a PPO iteration counter publicly, so this stands in for "how far has training gotten" in the UI. */
+	int32 GetTrainingStepCount() const { return TrainingStepCount.load(std::memory_order_relaxed); }
+
+	/** Total episodes completed (summed across every agent) since StartTraining -- incremented once per UMutoRLTrainingEnvironment::ResetAgentEpisode_Implementation call. */
+	int32 GetEpisodeCount() const { return EpisodeCount.load(std::memory_order_relaxed); }
 
 	// ----- Rig assets -----
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Rig")
@@ -254,8 +301,17 @@ public:
 	 * tuned per training run -- e.g. a curriculum that starts low (easier to
 	 * balance while the policy is still learning basic coordination) and
 	 * raises it toward -980 as training progresses.
+	 *
+	 * Nested under "Muto RL|Simulation|Gravity" specifically (not the bare
+	 * "Muto RL|Simulation" every other Simulation property uses) so it can
+	 * ALSO be listed in SAgentSolverControlPanel's RewardSettingsCategoryPrefixes
+	 * without pulling in the rest of Simulation (e.g. bAutoStartOnBeginPlay)
+	 * too -- still caught by the Physics tab's plain "Muto RL|Simulation"
+	 * prefix as well (StartsWith), so it keeps showing there too. One real
+	 * UPROPERTY, editable from both IDetailsViews -- not a separate mirrored
+	 * copy that could drift out of sync.
 	 */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Simulation")
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Simulation|Gravity")
 	FVector Gravity = FVector(0.0f, 0.0f, -980.0f);
 
 
@@ -289,6 +345,28 @@ public:
 	/** See CreatureRLEnvironment::FEnvConfig::TorquePenaltyWeight's comment -- TorquePenalty is now normalized to [0,1], this weight is directly comparable to AliveBonus/UprightWeight/BalanceWeight. */
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
 	float TorquePenaltyWeight = 0.1f;
+
+	// ----- Reward Settings pane (see SAgentSolverControlPanel.h) -- deliberately
+	// a SEPARATE "Muto RL|Tuning" category, not "Muto RL|Reward" above, so this
+	// doesn't ALSO show in the Agent tab (whose category-prefix allowlist would
+	// otherwise catch it too, showing every field twice). See
+	// CreatureRLEnvironment::ComputeTorsoHeightBonus/ComputeEnergyConsumptionMalus/
+	// ComputeMusclesUseMalus for the exact formulas these feed. -----
+	/** Torso height (Batch.GetBodyPos(0,Env).Z) the exponential-falloff height bonus rewards being close to. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Torso Height")
+	float RewardHeightTarget = 100.0f;
+
+	/** Scales the torso-height bonus's contribution to the total reward (added, not subtracted). */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Torso Height")
+	float RewardHeightMultiplier = 1.0f;
+
+	/** Scales the energy-consumption malus (sum of |commanded torque| across DOFs, /10000). */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Muscle Penalty")
+	float RewardEnergyConsumptionMultiplier = 1.0f;
+
+	/** Scales the muscles-use malus (sum, across DOFs, of commanded torque as a % of max power at the DOF's current angle). */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Muscle Penalty")
+	float RewardMusclesUseMultiplier = 1.0f;
 
 	// ----- Reset domain randomization -----
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Reset")
@@ -786,17 +864,36 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Training")
 	FDirectoryPath NetworkSnapshotDirectory;
 
-	/** Encoder network asset used by SaveTrainedNetworksToAssets/LoadTrainedNetworksFromAssets. Unassigned = that slot is skipped. */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Training|Network Assets")
-	TObjectPtr<ULearningAgentsNeuralNetwork> EncoderNetworkAsset;
+	// ----- Network assets -- separate Load/Save trios on purpose (2026-08-21):
+	// a single shared trio would force overwriting your seed checkpoint the
+	// moment you save trained results, since Save and Load would target the
+	// same asset. Save writes Policy's live weights out; Load hot-swaps
+	// Policy's weights in -- see SaveTrainedNetworksToAssets/
+	// LoadTrainedNetworksFromAssets. Any slot left unassigned is skipped.
 
-	/** Policy network asset used by SaveTrainedNetworksToAssets/LoadTrainedNetworksFromAssets. Unassigned = that slot is skipped. */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Training|Network Assets")
-	TObjectPtr<ULearningAgentsNeuralNetwork> PolicyNetworkAsset;
+	/** Encoder network asset LoadTrainedNetworksFromAssets reads from. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
+	TObjectPtr<ULearningAgentsNeuralNetwork> LoadEncoderNetworkAsset;
 
-	/** Decoder network asset used by SaveTrainedNetworksToAssets/LoadTrainedNetworksFromAssets. Unassigned = that slot is skipped. */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Training|Network Assets")
-	TObjectPtr<ULearningAgentsNeuralNetwork> DecoderNetworkAsset;
+	/** Policy network asset LoadTrainedNetworksFromAssets reads from. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
+	TObjectPtr<ULearningAgentsNeuralNetwork> LoadPolicyNetworkAsset;
+
+	/** Decoder network asset LoadTrainedNetworksFromAssets reads from. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
+	TObjectPtr<ULearningAgentsNeuralNetwork> LoadDecoderNetworkAsset;
+
+	/** Encoder network asset SaveTrainedNetworksToAssets writes to. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
+	TObjectPtr<ULearningAgentsNeuralNetwork> SaveEncoderNetworkAsset;
+
+	/** Policy network asset SaveTrainedNetworksToAssets writes to. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
+	TObjectPtr<ULearningAgentsNeuralNetwork> SavePolicyNetworkAsset;
+
+	/** Decoder network asset SaveTrainedNetworksToAssets writes to. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
+	TObjectPtr<ULearningAgentsNeuralNetwork> SaveDecoderNetworkAsset;
 
 	/** If true and a snapshot exists in NetworkSnapshotDirectory, StartTraining loads it into the freshly created Policy before the first training step -- resumes a previous run instead of starting from random weights. */
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Training")
@@ -844,6 +941,22 @@ public:
 	FQuat StandingTorsoRot = FQuat::Identity;
 	FRandomStream ResetStream;
 	TArray<FName> BodyDebugNames; // body index -> bone name (index 0 is the synthetic "Torso" label, not a real bone)
+
+	// ----- UI status readouts (see GetAverageReward/GetTrainingStepCount/GetEpisodeCount) -----
+	// Public and atomic, not UPROPERTY -- written from the background training
+	// thread (UMutoRLTrainingEnvironment/RunOneTrainingStep, both in this same
+	// .cpp), read from the game thread by the control panel's Slate bindings.
+	// Single-writer/multi-reader, so plain atomics (no lock) are sufficient --
+	// same reasoning as ConcurrentStepDepth below.
+	std::atomic<float> AverageReward{0.0f};
+	std::atomic<int32> TrainingStepCount{0};
+	std::atomic<int32> EpisodeCount{0};
+	// Same EMA/single-writer pattern as AverageReward, one per ComputeReward
+	// component -- see GetLastTorsoHeightBonus/GetLastEnergyConsumptionMalus/
+	// GetLastMusclesUseMalus.
+	std::atomic<float> LastTorsoHeightBonus{0.0f};
+	std::atomic<float> LastEnergyConsumptionMalus{0.0f};
+	std::atomic<float> LastMusclesUseMalus{0.0f};
 
 protected:
 	/**
@@ -992,6 +1105,9 @@ protected:
 
 	/** Calls RunOneTrainingStep() in a loop until it returns false or a stop is requested; runs entirely off the game thread (see StartTraining()). */
 	void RunTrainingThreadLoop();
+
+	/** Shared body of EndPlay/StopTraining -- see StopTraining()'s comment. */
+	void StopTrainingInternal();
 
 	std::atomic<bool> bStopTrainingThreadRequested{false};
 	TFuture<void> TrainingThreadFuture;

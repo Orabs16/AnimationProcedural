@@ -88,4 +88,10 @@ private:
 	void RefreshNetworkSnapshot(bool bBlockUntilAvailable);
 
 	float NetworkRefreshTimer = 0.0f;
+
+	/** Gates Tick()'s "[AS-TRACE]" agent+physics-tick heartbeat to roughly once a second instead of every frame -- see FAgentSolverViewportClient's matching mesh-show heartbeat, same "[AS-TRACE]" prefix so both sides of the pipeline can be read as one ordered trace. */
+	int32 TraceHeartbeatCounter = 0;
+
+	/** So the "Policy is null, Tick() no-oping entirely" warning below logs once when it starts, not every frame -- mirrors FAgentSolverViewportClient::LastPoseFailureReason's dedup pattern. */
+	bool bLoggedNullPolicyWarning = false;
 };

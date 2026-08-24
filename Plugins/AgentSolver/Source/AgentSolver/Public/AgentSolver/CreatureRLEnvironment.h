@@ -105,6 +105,14 @@ namespace CreatureRLEnvironment
 		// AliveBonus/UprightWeight/BalanceWeight's own ~1-ish scale, not a
 		// tiny fraction of a huge raw sum-of-squared-torques like it used to be.
 		float TorquePenaltyWeight = 0.1f;
+
+		// Reward Settings pane (see SAgentSolverControlPanel.h) -- see
+		// ComputeTorsoHeightBonus/ComputeEnergyConsumptionMalus/
+		// ComputeMusclesUseMalus below for the exact formulas these feed.
+		float RewardHeightTarget = 100.0f;
+		float RewardHeightMultiplier = 1.0f;
+		float RewardEnergyConsumptionMultiplier = 1.0f;
+		float RewardMusclesUseMultiplier = 1.0f;
 	};
 
 	/** Observation layout: [TorsoUp.XYZ, TorsoLinVel.XYZ, TorsoAngVel.XYZ, TorsoHeight-Target, (JointPos,JointVel) x NumDOF, (bTouching,NormalForce) x NumContactPoints]. */
@@ -154,6 +162,26 @@ namespace CreatureRLEnvironment
 			OutObservation.Add(State.bTouching ? 1.0f : 0.0f);
 			OutObservation.Add(State.NormalForce);
 		}
+
+		// Same reasoning as ComputeReward's own IsFinite fallback, and the
+		// same race: IsTerminated (via IsBodyStateValid) catches a physics
+		// blowup and marks the agent Terminated, but Learning Agents' own
+		// ULearningAgentsPPOTrainer::ProcessExperience then gathers ONE
+		// terminal observation of that SAME corrupted state for the replay
+		// buffer (Interactor->GatherObservations, called on the just-completed
+		// instances) BEFORE Manager->ResetAgents() actually overwrites it a
+		// few lines later in the same function -- so a blowup can still reach
+		// here even though IsTerminated already flagged it. Unlike the reward
+		// path (a single scalar), a blown-up state can leave ANY subset of
+		// these floats non-finite, not just one -- sanitize the whole vector
+		// in one pass rather than trying to guard each field individually.
+		for (float& Value : OutObservation)
+		{
+			if (!FMath::IsFinite(Value))
+			{
+				Value = 0.0f;
+			}
+		}
 	}
 
 	/** Normalized [-1,1] action per DOF -> Batch.JointTorque, scaled by Config.MaxTorquePerDOF. */
@@ -169,6 +197,107 @@ namespace CreatureRLEnvironment
 	}
 
 	/**
+	 * "How strong can this muscle currently pull, given the DOF's present
+	 * angle" -- i.e. the authored Extension/Flexion strength scalar times the
+	 * matching curve's value at the current angle, picking Extension vs
+	 * Flexion by the SIGN of the commanded torque, exactly the same
+	 * computation FCreatureABASolver::ComputeMuscleMultipliers() does
+	 * internally to fold into JointTorque during Step() (that one is private
+	 * and only reachable from inside the solver, hence this standalone
+	 * duplicate -- both read only Batch/Topo, no solver-internal-only state,
+	 * so there's nothing it needs that isn't already available here). DOFs
+	 * with no authored curve (DOFHasMuscleCurve==false) return 1.0 -- no
+	 * angle-dependent effect for anything that doesn't have this data.
+	 */
+	inline float ComputeMuscleStrengthAtCurrentAngle(const FCreatureTopology& Topo, const FCreatureBatchState& Batch, int32 DOF, int32 DOFIdx)
+	{
+		if (!Topo.DOFHasMuscleCurve[DOF])
+		{
+			return 1.0f;
+		}
+
+		const FRichCurve* ExtCurve = Topo.DOFExtensionCurve[DOF].GetRichCurveConst();
+		const FRichCurve* FlexCurve = Topo.DOFFlexionCurve[DOF].GetRichCurveConst();
+		const float ExtStrength = FMath::Max(Topo.DOFExtensionStrength[DOF], 0.0f);
+		const float FlexStrength = FMath::Max(Topo.DOFFlexionStrength[DOF], 0.0f);
+		const float MinDeg = Topo.DOFRangeMinDeg[DOF];
+		const float MaxDeg = Topo.DOFRangeMaxDeg[DOF]; // already unwrapped > MinDeg
+
+		const float AngleDeg = FMath::RadiansToDegrees(Batch.JointPos[DOFIdx]);
+		float Wrapped = FMath::Fmod(AngleDeg - MinDeg, 360.0f);
+		if (Wrapped < 0.0f) Wrapped += 360.0f;
+		const float T = (MaxDeg > MinDeg) ? FMath::Clamp(Wrapped / (MaxDeg - MinDeg), 0.0f, 1.0f) : 0.0f;
+
+		const float Torque = Batch.JointTorque[DOFIdx];
+		const float CurveVal = (Torque >= 0.0f)
+			? ExtStrength * (ExtCurve ? ExtCurve->Eval(T) : 1.0f)
+			: FlexStrength * (FlexCurve ? FlexCurve->Eval(T) : 1.0f);
+		return FMath::Max(CurveVal, 0.0f);
+	}
+
+	/**
+	 * Reward-Settings-pane "Torso Height" bonus (see
+	 * AMutoRLTrainingDriver::RewardHeightTarget/RewardHeightMultiplier) --
+	 * exponential falloff, always positive, maxed out (== RewardMultiplier)
+	 * exactly at TargetHeight: RewardMultiplier * exp(-|Height-Target|/Target).
+	 * Same falloff shape ComputeReward's own BalanceTerm already uses.
+	 * Height is Batch.GetBodyPos(0,Env).Z directly (not offset by
+	 * Config.GroundZ) -- consistent with GroundZ always being 0.0f in
+	 * practice (see AMutoRLTrainingDriver::StartTraining).
+	 */
+	inline float ComputeTorsoHeightBonus(const FCreatureBatchState& Batch, int32 Env, float TargetHeight, float RewardMultiplier)
+	{
+		const float CurrentHeight = (float)Batch.GetBodyPos(0, Env).Z;
+		const float SafeTarget = FMath::Max(TargetHeight, KINDA_SMALL_NUMBER);
+		return RewardMultiplier * FMath::Exp(-FMath::Abs(CurrentHeight - TargetHeight) / SafeTarget);
+	}
+
+	/**
+	 * Reward-Settings-pane "Energy Consumption" malus (see
+	 * AMutoRLTrainingDriver::RewardEnergyConsumptionMultiplier). Formula as
+	 * specified: sum the magnitude of every DOF's commanded torque ("the
+	 * forces applied by the muscles" -- Batch.JointTorque is this solver's
+	 * per-DOF torque/force channel), divide by 10000, multiply by
+	 * EnergyConsumptionMultiplier.
+	 */
+	inline float ComputeEnergyConsumptionMalus(const FCreatureBatchState& Batch, int32 Env, float EnergyConsumptionMultiplier)
+	{
+		const FCreatureTopology& Topo = Batch.GetTopology();
+		float TotalForce = 0.0f;
+		for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
+		{
+			TotalForce += FMath::Abs(Batch.JointTorque[Batch.DOFIndex(DOF, Env)]);
+		}
+		return (TotalForce / 10000.0f) * EnergyConsumptionMultiplier;
+	}
+
+	/**
+	 * Reward-Settings-pane "Muscles Use" malus (see
+	 * AMutoRLTrainingDriver::RewardMusclesUseMultiplier). Formula as
+	 * specified: for each muscle, "how much it's activated in % of its max
+	 * power AT THE ANGLE it's currently at" -- commanded torque magnitude
+	 * divided by (MaxTorquePerDOF * the angle-dependent strength multiplier
+	 * from ComputeMuscleStrengthAtCurrentAngle above, i.e. the actual torque
+	 * ceiling right now, not the topology-wide MaxTorquePerDOF alone) --
+	 * summed across DOFs, times MusclesUseMultiplier.
+	 */
+	inline float ComputeMusclesUseMalus(const FCreatureBatchState& Batch, int32 Env, float MaxTorquePerDOF, float MusclesUseMultiplier)
+	{
+		const FCreatureTopology& Topo = Batch.GetTopology();
+		float TotalActivation = 0.0f;
+		for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
+		{
+			const int32 DOFIdx = Batch.DOFIndex(DOF, Env);
+			const float MaxPowerAtAngle = MaxTorquePerDOF * ComputeMuscleStrengthAtCurrentAngle(Topo, Batch, DOF, DOFIdx);
+			if (MaxPowerAtAngle > KINDA_SMALL_NUMBER)
+			{
+				TotalActivation += FMath::Abs(Batch.JointTorque[DOFIdx]) / MaxPowerAtAngle;
+			}
+		}
+		return TotalActivation * MusclesUseMultiplier;
+	}
+
+	/**
 	 * Standing/balance reward: alive bonus + how upright the torso is +
 	 * how close the contact points' force-weighted centroid (center of
 	 * pressure) sits under the torso horizontally (a standard postural
@@ -176,7 +305,15 @@ namespace CreatureRLEnvironment
 	 * phrasing from the original handoff, which predates the ground contact
 	 * model's CanTouchGround-driven redesign and no longer maps onto a
 	 * single distinguished "ankle" point per limb) - torque-squared penalty
-	 * to discourage needless effort.
+	 * to discourage needless effort, plus the Reward-Settings-pane's torso-
+	 * height bonus and muscle-penalty (energy/muscles-use) malus terms (see
+	 * ComputeTorsoHeightBonus/ComputeEnergyConsumptionMalus/
+	 * ComputeMusclesUseMalus above). The three optional Out* pointers let a
+	 * caller (SAgentSolverControlPanel's visualization graphs, via
+	 * AMutoRLTrainingDriver::LastTorsoHeightBonus/LastEnergyConsumptionMalus/
+	 * LastMusclesUseMalus) read the individual components without
+	 * recomputing them separately and risking drift from this function's own
+	 * math.
 	 */
 	inline float ComputeReward(
 		const FCreatureBatchState& Batch,
@@ -184,7 +321,10 @@ namespace CreatureRLEnvironment
 		const FEnvConfig& Config,
 		const TArray<FContactPointDef>& ContactPoints,
 		const TArray<FContactPointState>& ContactStates,
-		int32 NumEnvsForContacts)
+		int32 NumEnvsForContacts,
+		float* OutTorsoHeightBonus = nullptr,
+		float* OutEnergyConsumptionMalus = nullptr,
+		float* OutMusclesUseMalus = nullptr)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
 		const FQuat TorsoRot = Batch.GetBodyRot(0, Env);
@@ -256,10 +396,20 @@ namespace CreatureRLEnvironment
 			TorquePenalty /= Topo.NumDOF;
 		}
 
+		const float TorsoHeightBonus = ComputeTorsoHeightBonus(Batch, Env, Config.RewardHeightTarget, Config.RewardHeightMultiplier);
+		const float EnergyConsumptionMalus = ComputeEnergyConsumptionMalus(Batch, Env, Config.RewardEnergyConsumptionMultiplier);
+		const float MusclesUseMalus = ComputeMusclesUseMalus(Batch, Env, Config.MaxTorquePerDOF, Config.RewardMusclesUseMultiplier);
+		if (OutTorsoHeightBonus) { *OutTorsoHeightBonus = TorsoHeightBonus; }
+		if (OutEnergyConsumptionMalus) { *OutEnergyConsumptionMalus = EnergyConsumptionMalus; }
+		if (OutMusclesUseMalus) { *OutMusclesUseMalus = MusclesUseMalus; }
+
 		const float Reward = Config.AliveBonus
 			+ Config.UprightWeight * UprightDot
 			+ Config.BalanceWeight * BalanceTerm
-			- Config.TorquePenaltyWeight * TorquePenalty;
+			- Config.TorquePenaltyWeight * TorquePenalty
+			+ TorsoHeightBonus
+			- EnergyConsumptionMalus
+			- MusclesUseMalus;
 
 		// A numerical blowup upstream (see IsBodyStateValid) can still reach
 		// here for the one step where the corrupted state's reward/completion
