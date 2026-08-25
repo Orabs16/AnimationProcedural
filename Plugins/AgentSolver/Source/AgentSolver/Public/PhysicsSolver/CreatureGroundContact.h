@@ -525,17 +525,19 @@ namespace CreatureGroundContact
 		TArray<float> PairTangentImpulse1;
 		TArray<float> PairTangentImpulse2;
 
-		/**
-		 * Working buffers for the global solve (FImpulseContactParams::
-		 * bUseGlobalSolve). Lives here rather than as a local so the dense matrix
-		 * and the response columns are not reallocated every substep -- at ~200
-		 * rows on the real rig that is a few hundred KB of churn per substep per
-		 * env otherwise. Contains no state that must survive between calls; it is
-		 * pooled memory, not persisted solver state (the persisted state is the
-		 * accumulated-impulse arrays above, which the global path writes back at
-		 * the end of each solve so warm starting works identically).
-		 */
-		FGlobalSolveScratch GlobalScratch;
+		// Working buffers for the global solve (FImpulseContactParams::
+		// bUseGlobalSolve) used to live here as FGlobalSolveScratch GlobalScratch,
+		// reused across substeps to avoid reallocating a few hundred KB of dense
+		// matrix + response columns per substep per env -- moved out to a
+		// function-local `static thread_local` inside ResolveGroundContactImpulses
+		// (2026-08-25) instead, since that per-env loop is now a ParallelFor: a
+		// single Cache-owned instance would have been shared/raced across
+		// concurrently-running envs the exact same way FCreatureABASolver's own
+		// ImpP/ImpU/DVScratch etc. were before their own thread_local conversion
+		// (see that comment). Still contains no state that must survive between
+		// calls -- the persisted state is the accumulated-impulse arrays above,
+		// which the global path writes back at the end of each env's solve so
+		// warm starting works identically regardless of where the scratch lives.
 
 		void EnsureSized(int32 NumPoints, int32 NumEnvs)
 		{
@@ -1555,12 +1557,30 @@ namespace CreatureGroundContact
 		// no production caller until 2026-08-17.
 		Solver.ComputeArticulatedInertias(Batch, LockedBody, LockedStride);
 
-		TArray<FActive> Active;
-		Active.Reserve(NumPoints * 2);
+		// [AS-TRACE] split timing (2026-08-25) confirmed this gather -- not the
+		// solve loop above, which the same day's ParallelFor already fixed down
+		// to ~4ms/call -- is the real cost: ~65-88ms/call x 4 substeps ~=
+		// contactMs almost exactly. Root cause: this loop calls
+		// Solver.ImpulseResponseAtPoint/JointImpulseResponse/
+		// BallJointImpulseResponse/PairImpulseResponseAtPoint (real per-contact
+		// solves, now thread-safe via CreatureBatchSolver.h's thread_local
+		// scratch) once per candidate, entirely single-threaded. Parallelized
+		// per-env below the same way the solve loop was: each env only ever
+		// touches its own Cache slots (Slot always folds Env into its offset,
+		// same invariant the solve-loop fix already relied on) so the only
+		// remaining shared-mutable-state problem is Active.Add() itself, which
+		// TArray does not make thread-safe for concurrent callers -- solved by
+		// having each env append to its own local array and flattening once,
+		// sequentially, after the parallel loop.
+		const double GatherStartTime = FPlatformTime::Seconds();
+
+		TArray<TArray<FActive>> PerEnvActive;
+		PerEnvActive.SetNum(NumEnvs);
 
 		// ---- gather active contacts + their effective masses (once) ----
-		for (int32 Env = 0; Env < NumEnvs; ++Env)
+		ParallelFor(NumEnvs, [&](int32 Env)
 		{
+			TArray<FActive>& EnvActive = PerEnvActive[Env];
 			for (int32 PointIdx = 0; PointIdx < NumPoints; ++PointIdx)
 			{
 				const FContactPointDef& Point = ContactPoints[PointIdx];
@@ -1619,9 +1639,17 @@ namespace CreatureGroundContact
 					{
 						continue; // no compliance along the normal -- nothing to solve
 					}
-					Active.Add(A);
+					EnvActive.Add(A);
 				}
 			}
+		});
+
+		TArray<FActive> Active;
+		{
+			int32 TotalActive = 0;
+			for (const TArray<FActive>& EnvActive : PerEnvActive) { TotalActive += EnvActive.Num(); }
+			Active.Reserve(TotalActive);
+			for (TArray<FActive>& EnvActive : PerEnvActive) { Active.Append(MoveTemp(EnvActive)); }
 		}
 
 		// ---- gather active limb-vs-limb pairs + their effective masses (once) ----
@@ -1641,9 +1669,14 @@ namespace CreatureGroundContact
 			const float ClampedPairHertz = FMath::Min(LimbCollision->Hertz, 0.25f / Dt);
 			PairSoft = MakeContactSoftness(ClampedPairHertz, LimbCollision->DampingRatio, Dt);
 
-			ActivePairs.Reserve(LimbPairs.Num());
-			for (int32 Env = 0; Env < NumEnvs; ++Env)
+			// Same per-env-array-then-flatten parallelization as the ground
+			// gather above, for the same reason: TArray::Add on a shared
+			// ActivePairs is not safe for concurrent callers.
+			TArray<TArray<FActivePair>> PerEnvActivePairs;
+			PerEnvActivePairs.SetNum(NumEnvs);
+			ParallelFor(NumEnvs, [&](int32 Env)
 			{
+				TArray<FActivePair>& EnvActivePairs = PerEnvActivePairs[Env];
 				for (int32 PairIdx = 0; PairIdx < LimbPairs.Num(); ++PairIdx)
 				{
 					const FLimbPairDef& Pair = LimbPairs[PairIdx];
@@ -1713,9 +1746,14 @@ namespace CreatureGroundContact
 					{
 						continue;
 					}
-					ActivePairs.Add(AP);
+					EnvActivePairs.Add(AP);
 				}
-			}
+			});
+
+			int32 TotalActivePairs = 0;
+			for (const TArray<FActivePair>& EnvActivePairs : PerEnvActivePairs) { TotalActivePairs += EnvActivePairs.Num(); }
+			ActivePairs.Reserve(TotalActivePairs);
+			for (TArray<FActivePair>& EnvActivePairs : PerEnvActivePairs) { ActivePairs.Append(MoveTemp(EnvActivePairs)); }
 		}
 
 		// ---- gather active joint-limit rows + their effective masses (once) ----
@@ -1758,8 +1796,18 @@ namespace CreatureGroundContact
 			const float MarginRad = FMath::DegreesToRadians(JointLimits->MarginDeg);
 			const float SlopRad = FMath::DegreesToRadians(JointLimits->SlopDeg);
 
-			for (int32 Env = 0; Env < NumEnvs; ++Env)
+			// Same per-env-array-then-flatten parallelization as the ground and
+			// pair gathers above -- this loop builds both LimitRows and
+			// BallLimitRows together (one pass over Body per env), so both get
+			// their own per-env array.
+			TArray<TArray<FLimitRow>> PerEnvLimitRows;
+			TArray<TArray<FBallLimitRow>> PerEnvBallLimitRows;
+			PerEnvLimitRows.SetNum(NumEnvs);
+			PerEnvBallLimitRows.SetNum(NumEnvs);
+			ParallelFor(NumEnvs, [&](int32 Env)
 			{
+				TArray<FLimitRow>& EnvLimitRows = PerEnvLimitRows[Env];
+				TArray<FBallLimitRow>& EnvBallLimitRows = PerEnvBallLimitRows[Env];
 				for (int32 Body = 1; Body < Topo.NumBodies; ++Body)
 				{
 					// Ball-joint cone-limit row: a single one-sided constraint
@@ -1812,7 +1860,7 @@ namespace CreatureGroundContact
 						const int32 BallSlot = Body * NumEnvs + Env;
 						if (bBallActive)
 						{
-							BallLimitRows.Add({ Body, BallDOFOffset, Env, BallSlot, ConstraintDir, SeparationRaw - SlopRad, BallInvMass });
+							EnvBallLimitRows.Add({ Body, BallDOFOffset, Env, BallSlot, ConstraintDir, SeparationRaw - SlopRad, BallInvMass });
 						}
 						else
 						{
@@ -1893,7 +1941,7 @@ namespace CreatureGroundContact
 
 					if (bLoActive)
 					{
-						LimitRows.Add({ DOF, Env, LoSlot, +1.0f, GapLoRad - SlopRad, InvMass });
+						EnvLimitRows.Add({ DOF, Env, LoSlot, +1.0f, GapLoRad - SlopRad, InvMass });
 					}
 					else
 					{
@@ -1905,14 +1953,22 @@ namespace CreatureGroundContact
 
 					if (bHiActive)
 					{
-						LimitRows.Add({ DOF, Env, HiSlot, -1.0f, GapHiRad - SlopRad, InvMass });
+						EnvLimitRows.Add({ DOF, Env, HiSlot, -1.0f, GapHiRad - SlopRad, InvMass });
 					}
 					else
 					{
 						Cache.JointLimitImpulse[HiSlot] = 0.0f;
 					}
 				}
-			}
+			});
+
+			int32 TotalLimitRows = 0, TotalBallLimitRows = 0;
+			for (const TArray<FLimitRow>& EnvLimitRows : PerEnvLimitRows) { TotalLimitRows += EnvLimitRows.Num(); }
+			for (const TArray<FBallLimitRow>& EnvBallLimitRows : PerEnvBallLimitRows) { TotalBallLimitRows += EnvBallLimitRows.Num(); }
+			LimitRows.Reserve(TotalLimitRows);
+			BallLimitRows.Reserve(TotalBallLimitRows);
+			for (TArray<FLimitRow>& EnvLimitRows : PerEnvLimitRows) { LimitRows.Append(MoveTemp(EnvLimitRows)); }
+			for (TArray<FBallLimitRow>& EnvBallLimitRows : PerEnvBallLimitRows) { BallLimitRows.Append(MoveTemp(EnvBallLimitRows)); }
 		}
 
 		// ================= SOLVE =================
@@ -1921,20 +1977,41 @@ namespace CreatureGroundContact
 		// where the switch sits: the gather is the part that has been measured and
 		// corrected repeatedly across entries 013-025, and none of that work is
 		// specific to how the rows are subsequently relaxed.
+		const double GatherEndTime = FPlatformTime::Seconds();
 		if (Params.bUseGlobalSolve)
 		{
 			// One block per env — rows in different envs never couple, so a single
 			// matrix over all of them would be block diagonal with 255 wasted
-			// blocks. See FGlobalRow's comment.
-			for (int32 Env = 0; Env < NumEnvs; ++Env)
+			// blocks. See FGlobalRow's comment. Parallelized across envs
+			// (2026-08-25) -- SolveConstraintsGlobalForEnv only READS the shared
+			// Active/ActivePairs/LimitRows/BallLimitRows lists (built once above,
+			// never mutated during solve) and only WRITES to Batch/Cache slots
+			// this Env owns (both always fold Env into their offset) plus its own
+			// scratch, which is why this was previously safe to leave sequential
+			// but not safe to parallelize outright: FCreatureABASolver's
+			// SolveImpulseResponse (called deep inside this) and the scratch `S`
+			// itself (see GlobalScratchTLS just below) both used to be shared,
+			// non-thread-safe state -- see FCreatureABASolver's ImpP/ImpU/
+			// DVScratch-etc. comment and FImpulseContactCache's former
+			// GlobalScratch comment for the two matching fixes that unblocked
+			// this. Measured before this change: ~330-410ms for this whole
+			// function at 256 envs (the dominant cost by far, after
+			// AMutoRLTrainingDriver::ApplyJointDamping's own parallelization
+			// brought its ~220-260ms down to ~30ms the same way).
+			static thread_local FGlobalSolveScratch GlobalScratchTLS;
+			ParallelFor(NumEnvs, [&](int32 Env)
 			{
 				SolveConstraintsGlobalForEnv(Env, Batch, Topo, Active, ActivePairs, LimitRows, BallLimitRows,
 					Params, JointLimits, LimbCollision, Soft, LimitSoft, PairSoft, T1, T2, Dt,
-					Solver, Cache, Cache.GlobalScratch,
+					Solver, Cache, GlobalScratchTLS,
 					// Only the watched env gets a trace, or the residual series from
 					// 256 envs would be interleaved into one unreadable array.
 					(DebugLog && Env == 0) ? DebugLog : nullptr);
-			}
+			});
+			const double SolveEndTime = FPlatformTime::Seconds();
+			UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] CreatureGroundContact::ResolveGroundContactImpulses: numEnvs=%d gatherMs=%.2f solveMs=%.2f active=%d pairs=%d limitRows=%d ballLimitRows=%d"),
+				NumEnvs, (GatherEndTime - GatherStartTime) * 1000.0, (SolveEndTime - GatherEndTime) * 1000.0,
+				Active.Num(), ActivePairs.Num(), LimitRows.Num(), BallLimitRows.Num());
 		}
 		else
 		{

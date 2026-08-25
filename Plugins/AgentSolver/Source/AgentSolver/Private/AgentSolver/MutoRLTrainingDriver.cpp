@@ -886,8 +886,15 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLTrainingDriver::StepPhysicsSubstepped: %d substeps -- stepMs=%.1f dampingMs=%.1f weldLockMs=%.1f contactMs=%.1f (contact = ground+jointLimit+limbCollision combined)."),
-		NumSubsteps, StepSeconds * 1000.0, DampingSeconds * 1000.0, WeldLockSeconds * 1000.0, ContactSeconds * 1000.0);
+	// bUseGlobalSolve added here specifically to settle whether contactMs is
+	// actually going through the parallelized SolveConstraintsGlobalForEnv
+	// path (ResolveGroundContactImpulses's `if (Params.bUseGlobalSolve)`) or
+	// the OTHER, still-sequential per-row path -- bUseGlobalConstraintSolve
+	// defaults to true on the C++ class, but a per-instance level override
+	// (e.g. from earlier contact-tuning experiments) would silently make the
+	// 2026-08-25 parallelization dead code for this specific placed actor.
+	UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLTrainingDriver::StepPhysicsSubstepped: %d substeps -- stepMs=%.1f dampingMs=%.1f weldLockMs=%.1f contactMs=%.1f bUseGlobalSolve=%d (contact = ground+jointLimit+limbCollision combined)."),
+		NumSubsteps, StepSeconds * 1000.0, DampingSeconds * 1000.0, WeldLockSeconds * 1000.0, ContactSeconds * 1000.0, ContactParams.bUseGlobalSolve ? 1 : 0);
 }
 
 // KNOWN STRUCTURAL HAZARD (2026-08-12) — read before touching this loop.
