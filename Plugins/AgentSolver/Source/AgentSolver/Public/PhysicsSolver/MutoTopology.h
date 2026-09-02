@@ -782,6 +782,7 @@ namespace MutoTopology
 				// per-muscle strength anyone authored had no effect on training.
 				OutTopology.DOFExtensionStrength[DOFIdx] = M->ExtensionStrength;
 				OutTopology.DOFFlexionStrength[DOFIdx] = M->FlexionStrength;
+				OutTopology.DOFMuscleActivationThreshold[DOFIdx] = FMath::Max(M->MuscleActivationThreshold, 0.0f);
 				OutTopology.DOFRangeMinDeg[DOFIdx] = M->MinRange;
 				// Ranges that cross the 0/360 boundary are authored with Min >
 				// Max (e.g. [315.8, 52.2] meaning -44.2..52.2) — unwrap Max so

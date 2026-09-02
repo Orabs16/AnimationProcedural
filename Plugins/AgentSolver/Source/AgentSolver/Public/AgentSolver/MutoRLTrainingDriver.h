@@ -49,7 +49,27 @@ class ULearningAgentsManager;
 class UMassMuscleProfileAssetMass;
 class UMassMuscleProfileAssetMuscle;
 class USkeletalMesh;
+class UAnimSequence;
 class AMutoRLTrainingDriver;
+class ULearningProgram;
+class ULearningProgramNode;
+
+/**
+ * Editor-facing mirror of CreatureRLEnvironment::EObjectiveMode -- the plain
+ * enum lives there so the header-only environment/reward code stays free of
+ * UObject machinery, and this UENUM exists purely so the Details panel shows a
+ * dropdown instead of a raw integer. Kept in lockstep by a static_assert in
+ * MutoRLTrainingDriver.cpp; do not renumber either one independently.
+ */
+UENUM()
+enum class EMutoObjectiveMode : uint8
+{
+	/** The original objective: stay upright, keep the centre of pressure under the torso, hold the target torso height. */
+	Standing UMETA(DisplayName = "Standing / Balance"),
+
+	/** Track a reference pose or animation (see CreatureImitation.h). */
+	Imitation UMETA(DisplayName = "Imitation"),
+};
 
 /**
  * Observation/action schema and per-step gather/perform, delegating to
@@ -80,6 +100,45 @@ public:
 	virtual void GatherAgentReward_Implementation(float& OutReward, const int32 AgentId) override;
 	virtual void GatherAgentCompletion_Implementation(ELearningAgentsCompletion& OutCompletion, const int32 AgentId) override;
 	virtual void ResetAgentEpisode_Implementation(const int32 AgentId) override;
+};
+
+/**
+ * One of these per env, purely as Manager->AddAgents' required per-agent
+ * UObject identity handle -- carries no data or behavior of its own. Used to
+ * be a bare NewObject<UObject>(this) (256 of them, one per env); that turned
+ * out to be the exact, reproducible cause of "Class which was marked
+ * abstract was trying to be loaded ... None Object" firing every single
+ * StartTraining() call (LogUObjectGlobals, UObjectGlobals.cpp:3444's
+ * ensureMsgf) -- decoding that ensure's own printf arguments gives
+ * InName="None", InClass->GetName()="Object", an exact match for a bare,
+ * unnamed UObject construction, and the ~256-line repeat count of the
+ * underlying warning (one per AddAgents loop iteration) matched exactly.
+ * Epic's own guidance is that NewObject<UObject>() directly (the literal
+ * base class, no subclass) is not a supported pattern -- a trivial concrete
+ * UCLASS sidesteps whatever editor-only check that trips on the bare base.
+ */
+UCLASS()
+class UMutoRLAgentHandle : public UObject
+{
+	GENERATED_BODY()
+};
+
+/**
+ * Live snapshot of a Learning Program's progress, for UI polling -- the node
+ * graph editor's active-node highlight and per-transition progress bars (see
+ * AMutoRLTrainingDriver::GetLearningProgramLiveState). Plain struct, not a
+ * USTRUCT: nothing here needs Blueprint/serialization, just a cheap
+ * lock-guarded copy out to the game thread.
+ */
+struct FLearningProgramLiveState
+{
+	/** False if ActiveLearningProgram is unset or StartTraining hasn't run yet (CurrentNodeId/the two progress fields below are meaningless when this is false). */
+	bool bValid = false;
+	FGuid CurrentNodeId;
+	/** AMutoRLTrainingDriver::GetAverageReward() at snapshot time -- compare against an AverageRewardTarget transition's ThresholdValue. */
+	float AverageReward = 0.0f;
+	/** GetTrainingStepCount() - NodeEntryTrainingStepCount at snapshot time -- compare against a StepsSinceNodeEntry transition's ThresholdValue. */
+	int32 StepsSinceNodeEntry = 0;
 };
 
 /**
@@ -215,6 +274,34 @@ public:
 	 */
 	FCriticalSection& GetTrainingStepLock() { return TrainingStepLock; }
 
+	/**
+	 * Thread-safe snapshot of the active Learning Program node/progress, for
+	 * the node graph editor to poll (active-node highlight, per-transition
+	 * progress bars) roughly every quarter second.
+	 *
+	 * Takes LearningProgramStateLock -- a SEPARATE, dedicated critical
+	 * section, deliberately NOT TrainingStepLock/GetTrainingStepLock(),
+	 * even though CurrentLearningProgramNodeId/NodeEntryTrainingStepCount are
+	 * themselves written from inside RunOneTrainingStep (which already holds
+	 * TrainingStepLock the whole time). TrainingStepLock is held for the
+	 * ENTIRE step, including Trainer->RunTraining() -- which this class's own
+	 * SharedMemoryCommunicatorSettings comment documents as measured at
+	 * ~375s for one real PPO iteration, with a 900s timeout. A polling Tick()
+	 * on the game thread taking that lock every 0.25s would therefore
+	 * intermittently block the ENTIRE EDITOR UI for as long as whatever
+	 * training step happened to be in flight -- exactly the "opening the
+	 * tool freezes the editor" bug this project already hit once before with
+	 * unthrottled/lock-heavy polling, and the reason GetTrainingStepLock()
+	 * exists as a distinct, narrowly-scoped lock from this one: taking it
+	 * here would silently reintroduce that bug. LearningProgramStateLock
+	 * instead guards ONLY the two fields above, held for a trivial
+	 * assignment/copy on both the write side (ApplyLearningProgramNode, which
+	 * only runs at StartTraining and at each transition -- rare) and this
+	 * read side, so it is never held for longer than a few instructions on
+	 * either thread.
+	 */
+	FLearningProgramLiveState GetLearningProgramLiveState();
+
 	/** Running exponential moving average of GatherAgentReward's per-agent, per-step reward, across every agent. Written only by the background training thread (UMutoRLTrainingEnvironment::GatherAgentReward_Implementation); safe to read from the game thread for UI status without a lock (single-writer, and each store is one atomic float write). Not used by training itself -- diagnostic only. */
 	float GetAverageReward() const { return AverageReward.load(std::memory_order_relaxed); }
 
@@ -224,6 +311,13 @@ public:
 	float GetLastTorsoHeightBonus() const { return LastTorsoHeightBonus.load(std::memory_order_relaxed); }
 	float GetLastEnergyConsumptionMalus() const { return LastEnergyConsumptionMalus.load(std::memory_order_relaxed); }
 	float GetLastMusclesUseMalus() const { return LastMusclesUseMalus.load(std::memory_order_relaxed); }
+	float GetLastPoseReward() const { return LastPoseReward.load(std::memory_order_relaxed); }
+	float GetLastVelocityReward() const { return LastVelocityReward.load(std::memory_order_relaxed); }
+	float GetLastEndEffectorReward() const { return LastEndEffectorReward.load(std::memory_order_relaxed); }
+	float GetLastRootReward() const { return LastRootReward.load(std::memory_order_relaxed); }
+
+	/** True once StartTraining has successfully baked a reference pose/motion. The control panel uses this to show the imitation graphs only when they mean something. */
+	bool HasReferenceMotion() const { return ReferenceMotionBaked.IsValid(); }
 
 	/** Total RunOneTrainingStep() calls that have completed since StartTraining -- Learning Agents doesn't expose a PPO iteration counter publicly, so this stands in for "how far has training gotten" in the UI. */
 	int32 GetTrainingStepCount() const { return TrainingStepCount.load(std::memory_order_relaxed); }
@@ -240,6 +334,39 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Rig")
 	TObjectPtr<UMassMuscleProfileAssetMuscle> MuscleAsset;
+
+	/**
+	 * Uniform multiplier on every muscle's delivered torque, applied on top of
+	 * MuscleAsset's own per-DOF ExtensionStrength/FlexionStrength curves (see
+	 * FCreatureABASolver::ComputeMuscleMultipliers's comment) -- a single
+	 * "how strong is this whole rig" knob, independent of MaxTorquePerDOF
+	 * (which caps what the POLICY can command, not what the muscle can
+	 * physically deliver once commanded) and independent of each DOF's own
+	 * authored strength (which sets its strength RELATIVE to other DOFs, not
+	 * the rig's overall scale). 1.0 reproduces the authored strengths exactly;
+	 * e.g. 0.5 halves every muscle's actual pulling force without touching
+	 * the muscle profile asset or retuning MaxTorquePerDOF/reward
+	 * normalization.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Rig|Muscle Strength")
+	float GlobalMuscleStrengthScale = 1.0f;
+
+	/**
+	 * Curriculum knob for FMassMuscleDataMuscle::MuscleActivationThreshold
+	 * (see CreatureRLEnvironment::FEnvConfig::MuscleActivationThresholdMultiplier's
+	 * comment for the mechanism): the EFFECTIVE per-DOF activation threshold
+	 * is the muscle asset's authored value times this multiplier, not the
+	 * authored value directly. 1.0 (default) reproduces the authored
+	 * thresholds exactly; 0.0 disables the dead zone entirely. Editable
+	 * while training is running (refreshed every step from
+	 * UMutoRLTrainingEnvironment::GatherAgentReward_Implementation, same as
+	 * MaxTorquePerDOF/the reward weights below) -- the intended use is to
+	 * start a run at 0 so early exploration isn't gated off before the
+	 * policy has learned anything, then raise it toward 1.0 once the policy
+	 * already knows how to move.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Rig|Muscle Strength")
+	float MuscleActivationThresholdMultiplier = 1.0f;
 
 	// ----- Simulation -----
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Simulation", meta = (ClampMin = "1"))
@@ -323,27 +450,51 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
 	float TargetTorsoHeightOverride = -1.0f;
 
-	/** See CreatureRLEnvironment::FEnvConfig::MaxTorquePerDOF's comment -- kept small deliberately given placeholder body masses. */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	/**
+	 * See CreatureRLEnvironment::FEnvConfig::MaxTorquePerDOF's comment --
+	 * kept small deliberately given placeholder body masses.
+	 *
+	 * Nested under "Muto RL|Reward|Torque" (2026-08-25), not the bare
+	 * "Muto RL|Reward" every other field below (except the Core
+	 * Weights/Termination groups) uses, so it ALSO shows in the Reward
+	 * Settings pane next to Torso Height/Muscle Penalty -- still caught by
+	 * the Agent tab's plain "Muto RL|Reward" prefix too (StartsWith), same
+	 * one-property-two-views trick Gravity already uses (see its own
+	 * comment). This one and TorquePenaltyWeight sit together since
+	 * MaxTorquePerDOF is what TorquePenalty is normalized against.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Torque")
 	float MaxTorquePerDOF = 5.0e7f;
 
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	/**
+	 * "Fallen over" termination threshold, not itself a reward term (see
+	 * CreatureRLEnvironment::IsTerminated) -- grouped under "Muto RL|Reward|
+	 * Termination" (2026-08-25) anyway since it directly shapes how much
+	 * reward an episode can accumulate before ending, same reasoning as
+	 * MinHeightFraction below. Same dual-tab trick as MaxTorquePerDOF above.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Termination")
 	float MinUprightDot = 0.5f;
 
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	/** See MinUprightDot's comment -- the other half of the same termination check. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Termination")
 	float MinHeightFraction = 0.5f;
 
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	/**
+	 * Nested under "Muto RL|Reward|Core Weights" (2026-08-25) -- same
+	 * dual-tab trick as MaxTorquePerDOF's comment above.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Core Weights")
 	float AliveBonus = 1.0f;
 
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Core Weights")
 	float UprightWeight = 1.0f;
 
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Core Weights")
 	float BalanceWeight = 0.5f;
 
-	/** See CreatureRLEnvironment::FEnvConfig::TorquePenaltyWeight's comment -- TorquePenalty is now normalized to [0,1], this weight is directly comparable to AliveBonus/UprightWeight/BalanceWeight. */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward")
+	/** See CreatureRLEnvironment::FEnvConfig::TorquePenaltyWeight's comment -- TorquePenalty is now normalized to [0,1], this weight is directly comparable to AliveBonus/UprightWeight/BalanceWeight. Grouped with MaxTorquePerDOF above -- see its comment for the category-nesting reasoning. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Reward|Torque")
 	float TorquePenaltyWeight = 0.1f;
 
 	// ----- Reward Settings pane (see SAgentSolverControlPanel.h) -- deliberately
@@ -360,13 +511,163 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Torso Height")
 	float RewardHeightMultiplier = 1.0f;
 
-	/** Scales the energy-consumption malus (sum of |commanded torque| across DOFs, /10000). */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Muscle Penalty")
+	/**
+	 * Scales the energy-consumption malus (sum, across DOFs, of |commanded
+	 * torque| as a fraction of MaxTorquePerDOF -- normalized 2026-08-26,
+	 * see CreatureRLEnvironment::ComputeEnergyConsumptionMalus's comment for
+	 * why the old flat /10000 divisor was wrong). DisplayName drops the
+	 * "Reward" prefix the C++/serialized name still carries (kept as-is so
+	 * already-tuned values and saved presets don't reset to default on a
+	 * rename) -- "Reward Energy Consumption Multiplier" read as scaling a
+	 * bonus, when this is SUBTRACTED from the total, which is exactly
+	 * backwards (2026-08-25 UI feedback).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Muscle Penalty", meta = (DisplayName = "Energy Consumption Malus Multiplier"))
 	float RewardEnergyConsumptionMultiplier = 1.0f;
 
-	/** Scales the muscles-use malus (sum, across DOFs, of commanded torque as a % of max power at the DOF's current angle). */
-	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Muscle Penalty")
+	/** Scales the muscles-use malus (sum, across DOFs, of commanded torque as a % of max power at the DOF's current angle). See RewardEnergyConsumptionMultiplier's comment for why this has a DisplayName override. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Muscle Penalty", meta = (DisplayName = "Muscles Use Malus Multiplier"))
 	float RewardMusclesUseMultiplier = 1.0f;
+
+	/**
+	 * Final multiplier applied to the fully-summed reward, AFTER every term
+	 * above (AliveBonus/UprightWeight/BalanceWeight/TorquePenaltyWeight/
+	 * TorsoHeightBonus/EnergyConsumptionMalus/MusclesUseMalus) -- see
+	 * CreatureRLEnvironment::ComputeReward's return statement. Rescales the
+	 * WHOLE reward the trainer sees in one place, without re-deriving every
+	 * individual weight above.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Global Scale")
+	float GlobalRewardScale = 1.0f;
+
+	/** Added AFTER GlobalRewardScale (Reward*Scale + Offset) -- see CreatureRLEnvironment::FEnvConfig::GlobalRewardOffset's comment. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Global Scale")
+	float GlobalRewardOffset = 0.0f;
+
+	// ----- Imitation: structural settings (see CreatureImitation.h / ImitationBake.h) -----
+	//
+	// These are all read ONCE, by StartTraining, because changing any of them
+	// requires re-baking the reference or re-shaping the observation -- unlike
+	// the weights further below, editing one mid-PIE does nothing until
+	// training is restarted. That is why they live under "Muto RL|Imitation"
+	// (the Agent tab) rather than "Muto RL|Tuning" (the always-visible Reward
+	// Settings pane, which is for things that respond live).
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation")
+	EMutoObjectiveMode ObjectiveMode = EMutoObjectiveMode::Standing;
+
+	/**
+	 * The clip to imitate. Must be authored against the same USkeleton as
+	 * SkeletalMesh, or the bake refuses it rather than silently reading the
+	 * wrong bones.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation")
+	TObjectPtr<UAnimSequence> ReferenceMotion;
+
+	/**
+	 * PHASE 1 (single pose): the time in ReferenceMotion to freeze on. The
+	 * whole clip collapses to this one frame, velocities are zero throughout,
+	 * and the task is "reach and hold this pose".
+	 *
+	 * Ignored when bImitateFullClip is true.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation", meta = (ClampMin = "0.0"))
+	float ReferencePoseTime = 0.0f;
+
+	/**
+	 * PHASE 2 (animation): bake the whole clip instead of one frame, index it
+	 * by phase, and give each episode a random starting phase.
+	 *
+	 * Turning this on also turns on the phase observation, which CHANGES THE
+	 * NETWORK'S INPUT SIZE -- networks saved with it off cannot be loaded with
+	 * it on. StartTraining logs the observation size on every run so the
+	 * change is visible rather than surprising.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation")
+	bool bImitateFullClip = false;
+
+	/** Bake rate for the clip. Independent of the source's own frame rate -- denser just interpolates, and a round rate keeps the finite-differenced reference velocities clean. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation", meta = (EditCondition = "bImitateFullClip", ClampMin = "1.0"))
+	float ReferenceSampleRate = 30.0f;
+
+	/** Whether the clip cycles. Controls both the phase wrap and the velocity finite-difference at the clip's ends -- leave it off for a one-shot motion, or the first and last frames get velocities that pretend the clip teleports back to its start. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation", meta = (EditCondition = "bImitateFullClip"))
+	bool bReferenceMotionLoops = true;
+
+	/**
+	 * Start each episode AT the reference (reference state initialization), so
+	 * the task is "hold/continue the motion" rather than "find it from a
+	 * standing start".
+	 *
+	 * Strongly recommended on, and for a cyclic motion effectively mandatory:
+	 * without it every episode begins at the clip's start, so the policy must
+	 * master the opening before it ever experiences the rest. With it, and
+	 * with bImitateFullClip, each episode picks a random phase, so all 256
+	 * envs together cover the entire clip from the very first PPO iteration.
+	 *
+	 * It also makes the first-frame sanity check possible: right after a
+	 * reset, the pose reward should read ~1.0. If it does not, the bake or the
+	 * retarget is wrong, and nothing in the training curve means anything yet.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation")
+	bool bResetToReferencePose = true;
+
+	/**
+	 * Bones whose positions the end-effector reward tracks -- feet and hands.
+	 * Matched against the same per-body bone names BuildMutoTopology produces
+	 * (see BodyDebugNames); anything unmatched is logged and skipped rather
+	 * than failing the bake.
+	 *
+	 * Empty means the end-effector term is a constant 1.0 and contributes
+	 * nothing but its weight. That is a real loss for locomotion: pose error
+	 * is measured per JOINT, so a small hip error and a small knee error can
+	 * each look negligible while compounding into a foot landing 20cm off.
+	 * The end-effector term is what notices that.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Imitation")
+	TArray<FName> EndEffectorBoneNames;
+
+	// ----- Imitation: live-tunable weights (Reward Settings pane) -----
+	//
+	// Under "Muto RL|Tuning|Imitation" deliberately, NOT "Muto RL|Reward|..." --
+	// SAgentSolverControlPanel filters by bare FString::StartsWith, so anything
+	// under "Muto RL|Reward" is ALSO caught by the Agent tab's own plain
+	// "Muto RL|Reward" prefix and would show twice. "Muto RL|Tuning" is already
+	// allow-listed for the Reward Settings pane alone.
+
+	/** Weight on the joint-pose tracking term. DeepMimic's published weighting is 0.65/0.10/0.15/0.10 across these four. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation", meta = (ClampMin = "0.0"))
+	float ImitationPoseWeight = 0.65f;
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation", meta = (ClampMin = "0.0"))
+	float ImitationVelocityWeight = 0.10f;
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation", meta = (ClampMin = "0.0"))
+	float ImitationEndEffectorWeight = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation", meta = (ClampMin = "0.0"))
+	float ImitationRootWeight = 0.10f;
+
+	/** Falloff rate of the pose term: exp(-Scale * mean squared joint error in radians). Larger = less forgiving. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation|Falloff", meta = (ClampMin = "0.0"))
+	float ImitationPoseErrorScale = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation|Falloff", meta = (ClampMin = "0.0"))
+	float ImitationVelocityErrorScale = 0.1f;
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation|Falloff", meta = (ClampMin = "0.0"))
+	float ImitationEndEffectorErrorScale = 40.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation|Falloff", meta = (ClampMin = "0.0"))
+	float ImitationRootErrorScale = 10.0f;
+
+	/** Mean per-joint pose error (radians) above which the episode ends. 0 disables. Imitation's analogue of the standing objective's fallen-over check. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation|Termination", meta = (ClampMin = "0.0"))
+	float ImitationMaxPoseErrorRad = 0.0f;
+
+	/** Whether imitation ALSO ends an episode on the MinUprightDot/MinHeightFraction thresholds. Turn off for a reference motion that legitimately puts the torso down (a crawl, a roll, a get-up), where those would end every episode on frame one. */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Tuning|Imitation|Termination")
+	bool bImitationTerminateOnUprightAndHeight = true;
 
 	// ----- Reset domain randomization -----
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Reset")
@@ -895,6 +1196,21 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning")
 	TObjectPtr<ULearningAgentsNeuralNetwork> SaveDecoderNetworkAsset;
 
+	/**
+	 * Optional curriculum: if set, StartTraining() applies its entry node's
+	 * Params (a UAgentSolverPreset) onto this actor before anything else
+	 * runs, instead of whatever was left in the Details panel/a manually
+	 * loaded preset. From then on, TickLearningProgramTransitions() (called
+	 * once per training step from RunOneTrainingStep) watches the current
+	 * node's Transitions and hot-swaps to the next node's Params the same
+	 * way -- see LearningProgram.h's top comment for the full design.
+	 *
+	 * Leave unset to train exactly as before (single preset/Details-panel
+	 * values, no automatic mid-run parameter changes).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Muto RL|Learning Program")
+	TObjectPtr<ULearningProgram> ActiveLearningProgram;
+
 	/** If true and a snapshot exists in NetworkSnapshotDirectory, StartTraining loads it into the freshly created Policy before the first training step -- resumes a previous run instead of starting from random weights. */
 	UPROPERTY(EditAnywhere, Category = "Muto RL|Training")
 	bool bLoadSnapshotOnStart = false;
@@ -942,6 +1258,61 @@ public:
 	FRandomStream ResetStream;
 	TArray<FName> BodyDebugNames; // body index -> bone name (index 0 is the synthetic "Torso" label, not a real bone)
 
+	// ----- Imitation runtime state -----
+	//
+	// Baked once by StartTraining on the game thread, then READ-ONLY for the
+	// rest of the run -- every env shares this one copy. Animation evaluation
+	// is not safe to run from the background training thread, and re-sampling
+	// per step would be pure waste when the result is a few hundred KB of
+	// plain floats.
+	CreatureImitation::FReferenceMotion ReferenceMotionBaked;
+
+	/**
+	 * Per-env phase offset into the reference clip, drawn fresh at each
+	 * episode reset (reference state initialization). Sized NumEnvs.
+	 *
+	 * Written by ResetAgentEpisode and read by GatherAgentReward/
+	 * GatherAgentObservation -- all on the same background training thread,
+	 * one env at a time, so no synchronization is needed beyond the
+	 * TrainingStepLock the step itself already takes.
+	 */
+	TArray<float> EnvPhaseOffset;
+
+	/** Simulated seconds elapsed in each env's current episode, used with EnvPhaseOffset to index the clip. Advanced once per training step. */
+	TArray<float> EnvEpisodeTime;
+
+	/**
+	 * Height the torso stands at in the rest pose -- the baseline the
+	 * reference frame's own rest-relative height is applied on top of (see
+	 * CreatureImitation::FReferenceFrame::RootHeightAboveRest). Equal to
+	 * Config.TargetTorsoHeight; kept as its own name so the root reward reads
+	 * as what it means rather than borrowing an unrelated field.
+	 */
+	float RestTorsoHeight = 100.0f;
+
+	/** Fills OutTarget for one env at the current episode time, sampling ReferenceMotionBaked by phase. Returns false (leaving Frame null) when there is no baked reference, which makes every consumer fall back to the standing objective. */
+	bool BuildImitationTarget(int32 EnvIndex, CreatureRLEnvironment::FImitationTarget& OutTarget, CreatureImitation::FReferenceFrame& OutFrameStorage) const;
+
+	/** Phase in [0,1) for one env right now -- what the phase observation encodes. Zero when there is no baked reference or the clip is a single pose. */
+	float GetEnvPhase(int32 EnvIndex) const;
+
+	/** Copies the live-tunable imitation weights/falloffs from the UPROPERTYs into Config, so Details-panel edits take effect without restarting training. Called once per agent per step, alongside the other tuning knobs. */
+	void ApplyLiveImitationTuning();
+
+	/**
+	 * Per-episode imitation reset: draws this env's starting phase (random for
+	 * a full clip, zero for a single pose) and, when bResetToReferencePose,
+	 * writes the reference frame into the env's joint state.
+	 *
+	 * Called from ResetAgentEpisode AFTER CreatureRLEnvironment::ResetEnv, so
+	 * it overwrites the rest pose that call just wrote rather than being
+	 * overwritten by it. No-ops entirely outside imitation mode.
+	 */
+	void ResetImitationEpisode(int32 EnvIndex);
+
+	/** Advances every env's episode clock by DeltaSeconds, so the reference phase tracks simulated time. Called once per training step, not once per agent. */
+	void AdvanceImitationClock(float DeltaSeconds);
+
 	// ----- UI status readouts (see GetAverageReward/GetTrainingStepCount/GetEpisodeCount) -----
 	// Public and atomic, not UPROPERTY -- written from the background training
 	// thread (UMutoRLTrainingEnvironment/RunOneTrainingStep, both in this same
@@ -957,6 +1328,14 @@ public:
 	std::atomic<float> LastTorsoHeightBonus{0.0f};
 	std::atomic<float> LastEnergyConsumptionMalus{0.0f};
 	std::atomic<float> LastMusclesUseMalus{0.0f};
+	// Imitation's four terms, same pattern again. Each is in (0,1] by
+	// construction, so they read directly on the control panel's line graphs
+	// with no rescaling -- and a pose reward pinned near 1.0 right after a
+	// reset is the single fastest way to confirm the retarget is correct.
+	std::atomic<float> LastPoseReward{0.0f};
+	std::atomic<float> LastVelocityReward{0.0f};
+	std::atomic<float> LastEndEffectorReward{0.0f};
+	std::atomic<float> LastRootReward{0.0f};
 
 protected:
 	/**
@@ -976,25 +1355,41 @@ protected:
 	 */
 	bool bStartTrainingCalled = false;
 
-	UPROPERTY()
+	// Transient -- all six are created fresh inside StartTraining() every
+	// session, never meant to outlive it. Without Transient, whatever these
+	// point to when the level happens to be saved gets serialized straight
+	// into the .umap on disk -- and since Interactor/TrainingEnvironment's
+	// actual runtime class (ULearningAgentsInteractor/
+	// ULearningAgentsTrainingEnvironment's own concrete Muto subclasses) is
+	// declared UCLASS(Abstract) at the ENGINE base level, reloading that
+	// baked-in reference on the next PIE start fails with "Class which was
+	// marked abstract was trying to be loaded ... It will be nulled out on
+	// save" (LogUObjectGlobals) -- confirmed present on both
+	// MutoRLTrainingDriver_1 and MutoRLVisualizerActor_0 every single PIE
+	// start, meaning TrainingLvl.umap already has one of these baked in from
+	// a save made while training was active.
+	UPROPERTY(Transient)
 	TObjectPtr<ULearningAgentsManager> Manager;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TObjectPtr<ULearningAgentsInteractor> Interactor;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TObjectPtr<ULearningAgentsPolicy> Policy;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TObjectPtr<ULearningAgentsCritic> Critic;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TObjectPtr<ULearningAgentsTrainingEnvironment> TrainingEnvironment;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TObjectPtr<ULearningAgentsPPOTrainer> Trainer;
 
-	UPROPERTY()
+	// Same reasoning as Manager/Interactor/Policy/etc. above -- up to NumEnvs
+	// (256) plain UObjects created fresh in StartTraining(), never meant to
+	// be baked into the level.
+	UPROPERTY(Transient)
 	TArray<TObjectPtr<UObject>> AgentObjects;
 
 	TArray<int32> AgentIdToEnvIndex;
@@ -1046,6 +1441,17 @@ protected:
 	 * makes the corruption impossible in the meantime.
 	 */
 	FCriticalSection TrainingStepLock;
+
+	/**
+	 * Guards ONLY CurrentLearningProgramNodeId/NodeEntryTrainingStepCount --
+	 * see GetLearningProgramLiveState()'s comment for why this is a separate
+	 * lock from TrainingStepLock rather than reusing it: TrainingStepLock is
+	 * held for a whole (potentially minutes-long) training step, and taking
+	 * it from the node graph editor's polling Tick() would freeze the editor
+	 * for that long. This lock is only ever held for a trivial copy/assign
+	 * on both sides.
+	 */
+	FCriticalSection LearningProgramStateLock;
 
 	/**
 	 * Re-entrancy detector for RunOneTrainingStep() -- incremented on entry,
@@ -1108,6 +1514,35 @@ protected:
 
 	/** Shared body of EndPlay/StopTraining -- see StopTraining()'s comment. */
 	void StopTrainingInternal();
+
+	/**
+	 * Applies Node->Params to this actor (UAgentSolverPreset::ApplyToDriver)
+	 * and resets NodeEntryTrainingStepCount to the current live counter, so
+	 * the next node's StepsSinceNodeEntry transitions measure progress
+	 * from THIS point, not from the start of training. No-ops if Node is
+	 * null. Called once from StartTraining (the entry node) and again from
+	 * TickLearningProgramTransitions whenever a transition fires.
+	 */
+	void ApplyLearningProgramNode(ULearningProgramNode* Node);
+
+	/**
+	 * Evaluates CurrentLearningProgramNode's Transitions against how far
+	 * EpisodeCount/TrainingStepCount have advanced since it was entered, and
+	 * calls ApplyLearningProgramNode on the first one whose threshold is met
+	 * (order in the Transitions array breaks ties). No-ops entirely when
+	 * ActiveLearningProgram is unset. Called once per training step from
+	 * RunOneTrainingStep, on the background training thread -- same thread
+	 * GatherAgentReward_Implementation already re-syncs these exact
+	 * UPROPERTYs into Config from, so writing them here needs no additional
+	 * locking (see that function's comment).
+	 */
+	void TickLearningProgramTransitions();
+
+	/** NodeId of whichever ULearningProgramNode is currently active, or an invalid Guid if ActiveLearningProgram is unset. Background-thread-only, like the two functions above. */
+	FGuid CurrentLearningProgramNodeId;
+
+	/** TrainingStepCount snapshotted at the moment CurrentLearningProgramNodeId was entered -- see ELearningProgramConditionType::StepsSinceNodeEntry's comment for why that condition measures progress since node entry, not since training started. */
+	int32 NodeEntryTrainingStepCount = 0;
 
 	std::atomic<bool> bStopTrainingThreadRequested{false};
 	TFuture<void> TrainingThreadFuture;

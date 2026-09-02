@@ -49,6 +49,15 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Muscle")
     FRuntimeFloatCurve FlexionStrengthCurve;
+
+    // Minimum |normalized action| (policy command, [-1,1]) required for this
+    // muscle to produce any torque at all -- below this, the muscle is
+    // treated as not activated and contributes zero torque, same idea as a
+    // biological motor-unit recruitment threshold. Applied in
+    // CreatureRLEnvironment::ApplyActions, the single choke point where a
+    // policy's normalized action becomes Batch.JointTorque.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Muscle")
+    float MuscleActivationThreshold = 0.2f;
 };
 
 USTRUCT(BlueprintType)

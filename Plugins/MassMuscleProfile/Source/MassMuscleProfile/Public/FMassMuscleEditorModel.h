@@ -144,6 +144,7 @@ public:
                 MuscleProfile->Muscles[MirrorIndex].MinRange = Muscle.MinRange;
                 MuscleProfile->Muscles[MirrorIndex].ExtensionStrength = Muscle.ExtensionStrength;
                 MuscleProfile->Muscles[MirrorIndex].FlexionStrength = Muscle.FlexionStrength;
+                MuscleProfile->Muscles[MirrorIndex].MuscleActivationThreshold = Muscle.MuscleActivationThreshold;
                 MuscleProfile->Muscles[MirrorIndex].Orientation = Muscle.Orientation;
                 continue;
             }

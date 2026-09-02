@@ -6,18 +6,60 @@ void SAgentSolverLineGraph::Construct(const FArguments& InArgs)
 {
 	LineColor = InArgs._LineColor;
 	MaxSamples = FMath::Max(2, InArgs._MaxSamples);
-	Samples.Reserve(MaxSamples);
+	Samples.Reserve(MaxSamples + 1);
 }
 
 void SAgentSolverLineGraph::AddSample(float Value)
 {
 	Samples.Add(Value);
+
 	if (Samples.Num() > MaxSamples)
 	{
-		// Ring-buffer eviction -- MaxSamples is small (~120-150) and this only
-		// runs a few times a second at most, so the O(n) shift from RemoveAt(0)
-		// is not worth a circular-index scheme here.
-		Samples.RemoveAt(0);
+		// 2:1 compression instead of RemoveAt(0) eviction -- see the header's
+		// file-level comment. AddSample only ever adds one sample at a time,
+		// so this only ever fires with Samples.Num() == MaxSamples + 1.
+		const int32 NewNum = Samples.Num() / 2;
+		for (int32 Index = 0; Index < NewNum; ++Index)
+		{
+			Samples[Index] = (Samples[2 * Index] + Samples[2 * Index + 1]) * 0.5f;
+		}
+		if (Samples.Num() % 2 == 1)
+		{
+			// Odd count: carry the final unpaired sample over uncompressed
+			// rather than dropping it -- it simply isn't averaged with
+			// anything yet, and will be the first half of a pair next time.
+			Samples[NewNum] = Samples[Samples.Num() - 1];
+			Samples.SetNum(NewNum + 1);
+		}
+		else
+		{
+			Samples.SetNum(NewNum);
+		}
+	}
+
+	float RawMin = Samples[0];
+	float RawMax = Samples[0];
+	for (const float Sample : Samples)
+	{
+		RawMin = FMath::Min(RawMin, Sample);
+		RawMax = FMath::Max(RawMax, Sample);
+	}
+
+	if (!bHasSmoothedRange)
+	{
+		SmoothedMinValue = RawMin;
+		SmoothedMaxValue = RawMax;
+		bHasSmoothedRange = true;
+	}
+	else
+	{
+		// Slow-moving on purpose -- ~10 samples to substantially catch up to
+		// a genuine, sustained shift in range, so one outlier sample (e.g.
+		// the overshoot right after a PPO policy update) only nudges the
+		// axis instead of snapping it. See the header comment.
+		constexpr float SmoothingAlpha = 0.1f;
+		SmoothedMinValue = FMath::Lerp(SmoothedMinValue, RawMin, SmoothingAlpha);
+		SmoothedMaxValue = FMath::Lerp(SmoothedMaxValue, RawMax, SmoothingAlpha);
 	}
 }
 
@@ -42,25 +84,19 @@ int32 SAgentSolverLineGraph::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 
 	if (Samples.Num() >= 2)
 	{
-		// Normalized to THIS paint's own visible min/max -- the point is a
-		// readable trend line, not an absolute-scale plot, and the value
-		// range (e.g. AverageReward vs StepsPerSecond) varies wildly between
-		// what feeds this widget.
-		float MinValue = Samples[0];
-		float MaxValue = Samples[0];
-		for (const float Value : Samples)
-		{
-			MinValue = FMath::Min(MinValue, Value);
-			MaxValue = FMath::Max(MaxValue, Value);
-		}
-		const float Range = FMath::Max(MaxValue - MinValue, KINDA_SMALL_NUMBER);
+		// Normalized to the EASED min/max (SmoothedMinValue/SmoothedMaxValue,
+		// updated once per AddSample -- see header comment), not this paint's
+		// instantaneous range. A sample outside the eased range is clamped
+		// to [0,1] below, so it draws as a flat clip at the top/bottom edge
+		// instead of rescaling -- and flattening -- the rest of the line.
+		const float Range = FMath::Max(SmoothedMaxValue - SmoothedMinValue, KINDA_SMALL_NUMBER);
 
 		TArray<FVector2D> Points;
 		Points.Reserve(Samples.Num());
 		for (int32 Index = 0; Index < Samples.Num(); ++Index)
 		{
 			const float X = (LocalSize.X * Index) / (float)(Samples.Num() - 1);
-			const float NormalizedY = (Samples[Index] - MinValue) / Range;
+			const float NormalizedY = FMath::Clamp((Samples[Index] - SmoothedMinValue) / Range, 0.0f, 1.0f);
 			// Y grows downward in local space -- flip so a HIGHER value draws HIGHER on screen.
 			const float Y = LocalSize.Y - (NormalizedY * LocalSize.Y);
 			Points.Add(FVector2D(X, Y));

@@ -7,8 +7,11 @@
 // (SAgentSolverViewport), and a parameter switcher on the right (Viewport /
 // Agent / Physics), each tab just an IDetailsView -- Viewport unfiltered
 // (UAgentSolverViewportSettings, so ViewportSource/EnvironmentLevel show as
-// their normal native combo box / asset picker rows), Agent/Physics filtered
-// to the current viewport-source actor's relevant UPROPERTY categories.
+// their normal native combo box / asset picker rows), Agent filtered to the
+// real AMutoRLTrainingDriver ALWAYS (never the viewport source -- see
+// Tick()'s comment for why that used to be a real bug), Physics filtered to
+// the viewport-source actor normally but the real driver while training is
+// active (same reasoning Gravity's own comment covers).
 // Deliberately NOT duplicated with bespoke Slate rows on top of these views
 // -- IDetailsView already renders enum properties as combo boxes and object
 // properties as asset pickers for free, so anything hand-built here would
@@ -54,6 +57,8 @@ class SAgentSolverViewport;
 class SAgentSolverLineGraph;
 class IDetailsView;
 class SWidgetSwitcher;
+class UAgentSolverPreset;
+struct FPropertyChangedEvent;
 
 class SAgentSolverControlPanel : public SCompoundWidget
 {
@@ -64,13 +69,40 @@ public:
 	void Construct(const FArguments& InArgs);
 
 	/**
-	 * Re-points the Agent/Physics parameter views at whichever actor
-	 * AgentSolverUI::FindViewportSourceActor(ViewportSettings->ViewportSource)
-	 * currently returns, and RewardSettingsView at AgentSolverUI::
-	 * FindTrainingDriver() (a separate lookup -- see this class's header
-	 * comment), both only on actual actor-instance CHANGE (e.g. across PIE
-	 * start/stop or a viewport-source switch), and, at most once every
-	 * GraphSampleIntervalSeconds, pushes a new sample into the reward/
+	 * Applies a preset: restores its EnvironmentLevel into ViewportSettings
+	 * (the cosmetic preview-scene level, NOT a switch of the editor's actual
+	 * open level -- see UAgentSolverPreset::EnvironmentLevel's comment for
+	 * why an earlier version of this function did that and why it was
+	 * removed), then copies every Rig/Network/Tuning field onto whatever
+	 * AMutoRLTrainingDriver AgentSolverUI::FindTrainingDriver() finds in the
+	 * currently open level. Rig assets (SkeletalMesh/MassAsset/MuscleAsset)
+	 * are only overwritten when the preset actually has one set -- an empty
+	 * preset field leaves the driver's current assignment alone rather than
+	 * nulling it out, since StartTraining() hard-requires all three (see
+	 * this function's own comment in the .cpp for the crash that motivated
+	 * this). Sets ViewportSettings->ActivePreset, which is what
+	 * SyncActivePresetFromDriver below and the Viewport tab's own picker row
+	 * both read. Called by FAgentSolverModule (double-click on a preset
+	 * asset, or the "load first found" fallback when the tool opens with
+	 * nothing pending) and by OnActivePresetPicked below when the Viewport
+	 * tab's picker row itself changes.
+	 */
+	void LoadPreset(UAgentSolverPreset* Preset);
+
+	/** Asset-registry scan for the first UAgentSolverPreset found, applied via LoadPreset if one exists. Called once by FAgentSolverModule::SpawnControlPanelTab when the tool opens with no specific preset pending. */
+	void LoadFirstAvailablePreset();
+
+	/**
+	 * Re-points PhysicsParametersView at whichever actor AgentSolverUI::
+	 * FindViewportSourceActor(ViewportSettings->ViewportSource) currently
+	 * returns (or the real training driver instead, while training is
+	 * active -- see this method's own .cpp comment), and AgentParametersView/
+	 * RewardSettingsView at AgentSolverUI::FindTrainingDriver() ALWAYS (a
+	 * separate lookup, tracked separately -- see this class's header
+	 * comment for why Agent must never follow the viewport source), both
+	 * only on actual actor-instance CHANGE (e.g. across PIE start/stop, a
+	 * viewport-source switch, or a training start/stop), and, at most once
+	 * every GraphSampleIntervalSeconds, pushes a new sample into the reward/
 	 * throughput/reward-component graphs (also from FindTrainingDriver()).
 	 * All cheap (a couple of actor-class iterators; the per-actor-change work
 	 * is skipped entirely on unchanged frames).
@@ -80,6 +112,9 @@ public:
 private:
 	FText GetStatusText() const;
 	FText GetStatsText() const;
+
+	/** Visible only while the active driver has a baked reference pose/motion -- on a standing run the four imitation graphs would just be permanently-empty boxes. */
+	EVisibility GetImitationGraphVisibility() const;
 
 	FReply OnStartTrainingClicked();
 	FReply OnStopTrainingClicked();
@@ -106,6 +141,24 @@ private:
 	/** One tab-strip button matching SMassMuscleMainWidget::OnTabClicked's Details/Settings header look (NoBorder button, tinted border, fixed-height centered label). */
 	static TSharedRef<SWidget> MakeTabButton(const FText& Label, TAttribute<bool> bIsActive, FOnClicked OnClicked);
 
+	/**
+	 * Bound to AgentParametersView/PhysicsParametersView/RewardSettingsView's
+	 * OnFinishedChangingProperties -- whenever an edit finishes on any of
+	 * those (Rig assets, network Load/Save slots, or a tuning knob), copies
+	 * the driver's current values for every preset-tracked field back into
+	 * ViewportSettings->ActivePreset and marks it dirty. No-ops if no preset
+	 * is active. Deliberately mark-dirty only, not an auto-disk-save --
+	 * unlike AMutoRLTrainingDriver::SaveTrainedNetworksToAssets (a deliberate
+	 * one-off "save my trained weights" click), this can fire many times a
+	 * second while dragging a slider, so forcing a disk write on every call
+	 * would be excessive; Ctrl+S / Save All still persists it same as any
+	 * other dirty asset.
+	 */
+	void SyncActivePresetFromDriver(const FPropertyChangedEvent& Event);
+
+	/** Bound to ViewportParametersView's OnFinishedChangingProperties -- if the edit was to ViewportSettings->ActivePreset (the Viewport tab's preset picker row), applies the newly picked preset via LoadPreset. */
+	void OnActivePresetPicked(const FPropertyChangedEvent& Event);
+
 	/** Backing object for the Viewport tab -- see AgentSolverViewportSettings.h. Owned here (kept alive for the panel's lifetime); the embedded viewport client only holds a weak reference. */
 	TStrongObjectPtr<UAgentSolverViewportSettings> ViewportSettings;
 
@@ -124,10 +177,24 @@ private:
 	TSharedPtr<SAgentSolverLineGraph> TorsoHeightBonusGraph;
 	TSharedPtr<SAgentSolverLineGraph> EnergyConsumptionMalusGraph;
 	TSharedPtr<SAgentSolverLineGraph> MusclesUseMalusGraph;
+	/**
+	 * The four imitation terms -- see AMutoRLTrainingDriver::GetLastPoseReward
+	 * and friends. Each is in (0,1] by construction, so they share a natural
+	 * common scale the maluses above do not.
+	 *
+	 * The pose graph is the one to watch first: immediately after a reset with
+	 * bResetToReferencePose on, it should sit at ~1.0. If it does not, the
+	 * retarget or the bake is wrong and nothing else on this panel means
+	 * anything yet.
+	 */
+	TSharedPtr<SAgentSolverLineGraph> PoseRewardGraph;
+	TSharedPtr<SAgentSolverLineGraph> VelocityRewardGraph;
+	TSharedPtr<SAgentSolverLineGraph> EndEffectorRewardGraph;
+	TSharedPtr<SAgentSolverLineGraph> RootRewardGraph;
 
-	/** So Tick() only calls SetObject on an actor change, not every frame. */
+	/** So Tick() only calls SetObject on an actor change, not every frame -- tracks PhysicsParametersView's target only (the one view that can legitimately follow the viewport source). */
 	TWeakObjectPtr<AMutoRLTrainingDriver> LastKnownSourceActor;
-	/** Same purpose as LastKnownSourceActor, but for RewardSettingsView, which tracks FindTrainingDriver() instead of the viewport source -- see this class's header comment for why. */
+	/** Same purpose as LastKnownSourceActor, but for AgentParametersView AND RewardSettingsView, which both ALWAYS track FindTrainingDriver() -- never the viewport source, see this class's header comment for why. */
 	TWeakObjectPtr<AMutoRLTrainingDriver> LastKnownDriverForReward;
 
 	/** Wall-clock time (FSlateApplication::GetCurrentTime()-scale) of the last graph sample; see GraphSampleIntervalSeconds. */

@@ -19,8 +19,12 @@
 			]
 		},
 		{
-    			"Name": "ControlRig",
-    			"Enabled": true
+			"Name": "ControlRig",
+			"Enabled": true
+		},
+		{
+			"Name": "Tensorboard",
+			"Enabled": true
 		}
 	]
 }

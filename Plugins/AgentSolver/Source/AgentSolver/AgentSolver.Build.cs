@@ -91,6 +91,11 @@ public class AgentSolver : ModuleRules
 					// GEditor->RequestPlaySession's DestinationSlateViewport at the
 					// level editor's own active viewport instead of a new window.
 					"LevelEditor",
+					// IAssetTools::RegisterAssetTypeActions, for
+					// FAgentSolverPresetAssetActions -- same module
+					// MassMuscleProfile's own asset actions need
+					// (MassMuscleProfile.Build.cs).
+					"AssetTools",
 				}
 				);
 		}

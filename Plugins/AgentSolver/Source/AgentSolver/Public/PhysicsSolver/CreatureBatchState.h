@@ -149,6 +149,16 @@ struct FCreatureTopology
 	TArray<float> DOFRangeMaxDeg;
 	TArray<uint8> DOFHasMuscleCurve;
 
+	// The muscle's authored FMassMuscleDataMuscle::MuscleActivationThreshold:
+	// minimum |normalized action| (policy command, [-1,1]) this DOF's muscle
+	// needs before it produces any torque at all. Read by
+	// CreatureRLEnvironment::ApplyActions -- the single choke point turning a
+	// policy's normalized action into Batch.JointTorque -- to zero out
+	// sub-threshold commands. Default 0 (not the muscle asset's 0.2 default)
+	// so a DOF with no authored muscle, and every synthetic test topology,
+	// activates at any nonzero command exactly as before.
+	TArray<float> DOFMuscleActivationThreshold;
+
 	/**
 	 * ARMATURE — added rotor inertia on the joint, MuJoCo's `armature`.
 	 *
@@ -265,6 +275,7 @@ struct FCreatureTopology
 		DOFRangeMinDeg.SetNumZeroed(NumDOF);
 		DOFRangeMaxDeg.SetNumZeroed(NumDOF);
 		DOFHasMuscleCurve.SetNumZeroed(NumDOF); // defaults false — multiplier 1 unless populated
+		DOFMuscleActivationThreshold.SetNumZeroed(NumDOF); // defaults 0 — no gating unless populated
 		// Both zeroed, i.e. OFF by default: an untouched topology (every
 		// synthetic test rig) reproduces the pre-armature, pre-damping solver
 		// exactly. Callers opt in — MutoTopology.h fills these from the

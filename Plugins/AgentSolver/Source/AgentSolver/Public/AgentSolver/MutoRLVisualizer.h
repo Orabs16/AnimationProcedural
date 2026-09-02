@@ -73,19 +73,63 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Muto RL Visualizer", meta = (ClampMin = "0.1"))
 	float NetworkRefreshInterval = 2.0f;
 
+	// ----- Live AI debug feed (see UIControls/SAgentSolverAIDebugPanel.h) -----
+	// Not UPROPERTY (plain runtime data, rebuilt every Tick()/StartTraining(),
+	// never meant to serialize) -- same treatment as Batch/Config above.
+	// Single-writer (this actor's own Tick(), game thread only) / read from
+	// the debug panel's own Slate Tick(), also game thread, so no lock is
+	// needed, unlike AverageReward's cross-thread EMAs on the base class.
+
+	/** This tick's full observation vector, exactly as fed to the policy — see CreatureRLEnvironment::ComputeObservations. Captured once per Tick(), just before RunInference(), so it reflects the SAME Batch/ContactStates snapshot the policy actually saw. */
+	TArray<float> LastObservation;
+
+	/** This tick's normalized [-1,1] action per DOF, i.e. Batch.JointTorque right after PerformAgentAction_Implementation's CreatureRLEnvironment::ApplyActions divided back by Config.MaxTorquePerDOF (the inverse of ApplyActions' own scale-up) — captured right after RunInference(), before StepPhysicsSubstepped() advances the sim. */
+	TArray<float> LastNormalizedActions;
+
+	/** Human-readable name for each LastObservation entry, same layout CreatureRLEnvironment::ComputeObservations documents (TorsoUp/TorsoLinVel/TorsoAngVel/HeightDelta, then JointPos/JointVel per DOF, then Touching/NormalForce per contact point). Rebuilt once in StartTraining() alongside BodyDebugNames — see BuildDebugNames(). */
+	TArray<FName> ObservationNames;
+
+	/** Human-readable name for each LastNormalizedActions entry (one per DOF). See ObservationNames. */
+	TArray<FName> ActionNames;
+
 private:
+	/** Fills ObservationNames/ActionNames from Topo/BodyDebugNames/ContactPoints — called once from StartTraining() after the topology and contact points exist. */
+	void BuildDebugNames();
+
+
 	/** Poses MeshComponent's bones from the current single-env Batch state (body 0 -> "Pelvis", every other body -> its own bone name via BodyDebugNames). */
 	void UpdateMeshPose();
 
 	/**
 	 * Copies SourceTrainingDriver's current network weights into this
-	 * actor's own, private network objects (see class comment). If
-	 * bBlockUntilAvailable is false and the training thread currently holds
+	 * actor's own, private network objects (see class comment). Always
+	 * non-blocking (TryLock): if the training thread currently holds
 	 * SourceTrainingDriver's network lock, the refresh is skipped for this
-	 * call rather than blocking — used for StartTraining()'s one-time
-	 * initial sync (true) vs. Tick()'s periodic refresh (false).
+	 * call rather than waiting for it.
+	 *
+	 * Used to ALWAYS be a genuine blocking Lock() for StartTraining()'s
+	 * one-time initial sync (the reasoning being "this runs once, at
+	 * startup, not per-tick, so blocking briefly is fine") -- that
+	 * assumption is false: AMutoRLTrainingDriver::RunOneTrainingStep() holds
+	 * this exact lock for the full duration of Trainer->RunTraining(),
+	 * measured at up to ~375s on a real run (see
+	 * AMutoRLTrainingDriver::AMutoRLTrainingDriver()'s
+	 * SharedMemoryCommunicatorSettings.Timeout comment, 900s chosen to clear
+	 * the slowest observed iteration) -- and the background training thread
+	 * starts grabbing it the moment StartTraining() runs, so a visualizer
+	 * started around the same time has a real chance of landing mid-sync
+	 * and blocking the GAME thread (i.e. freezing the whole editor) for
+	 * that same multi-minute span. Confirmed as the cause of a reported
+	 * "editor completely freezes when starting Imitation training" bug --
+	 * not actually Imitation-specific (the lock is unconditional), just
+	 * more likely to land mid-sync there (longer-surviving episodes delay
+	 * the replay buffer filling, so the first RunTraining() call for a
+	 * batch of Imitation episodes tends to run longer). Non-blocking here
+	 * means the mesh may show its default/random-weights pose for up to
+	 * NetworkRefreshInterval seconds after starting, instead of trained
+	 * weights immediately -- a trivial cost next to freezing the editor.
 	 */
-	void RefreshNetworkSnapshot(bool bBlockUntilAvailable);
+	void RefreshNetworkSnapshot();
 
 	float NetworkRefreshTimer = 0.0f;
 

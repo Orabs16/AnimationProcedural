@@ -152,12 +152,12 @@ public:
 		return F;
 	}
 
-	void Step(FCreatureBatchState& Batch, float Dt, const FVector& Gravity = FVector(0.0f, 0.0f, -980.0f))
+	void Step(FCreatureBatchState& Batch, float Dt, const FVector& Gravity = FVector(0.0f, 0.0f, -980.0f), float GlobalMuscleStrengthScale = 1.0f)
 	{
-		StepSIMD(Batch, Dt, Gravity);
+		StepSIMD(Batch, Dt, Gravity, GlobalMuscleStrengthScale);
 	}
 
-	void StepScalar(FCreatureBatchState& Batch, float Dt, const FVector& Gravity = FVector(0.0f, 0.0f, -980.0f))
+	void StepScalar(FCreatureBatchState& Batch, float Dt, const FVector& Gravity = FVector(0.0f, 0.0f, -980.0f), float GlobalMuscleStrengthScale = 1.0f)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
 		const int32 NumBodies = Topo.NumBodies;
@@ -176,7 +176,7 @@ public:
 		// Zeroed, not merely sized: body 0 never writes its own C (Pass 1 starts
 		// at Body 1) and Pass 2/3b read it, so it must be a reliable zero.
 		CAcc.SetNumZeroed(BodySlots, EAllowShrinking::No);
-		ComputeMuscleMultipliers(Batch);
+		ComputeMuscleMultipliers(Batch, GlobalMuscleStrengthScale);
 
 		// ---- Pass 1: forward kinematics + velocity propagation (base -> tip) ----
 		// Parallelized across envs (see class comment): one task per env, body
@@ -593,7 +593,7 @@ public:
 
 	}
 
-	void StepSIMD(FCreatureBatchState& Batch, float Dt, const FVector& Gravity = FVector(0.0f, 0.0f, -980.0f))
+	void StepSIMD(FCreatureBatchState& Batch, float Dt, const FVector& Gravity = FVector(0.0f, 0.0f, -980.0f), float GlobalMuscleStrengthScale = 1.0f)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
 		const int32 NumBodies = Topo.NumBodies;
@@ -623,7 +623,7 @@ public:
 				CAcc8.Store(Batch.BodyIndex(0, Env), Zero8);
 			}
 		}
-		ComputeMuscleMultipliers(Batch);
+		ComputeMuscleMultipliers(Batch, GlobalMuscleStrengthScale);
 
 		const __m256 DtVec = _mm256_set1_ps(Dt);
 		const FVec3x8 Gravity8 = FVec3x8::Broadcast(Gravity);
@@ -1235,10 +1235,19 @@ private:
 	 * JointTorque for that DOF — i.e. "how strong can this muscle currently
 	 * pull in the direction it's being asked to pull". DOFs with no authored
 	 * curve (DOFHasMuscleCurve==false, e.g. every DOF in the synthetic test
-	 * topologies, or Muto's still-unarticulated spine) get multiplier 1: no
-	 * behavior change for anything that doesn't have this data.
+	 * topologies, or Muto's still-unarticulated spine) get multiplier 1
+	 * (before GlobalMuscleStrengthScale): no per-angle behavior change for
+	 * anything that doesn't have this data.
+	 *
+	 * GlobalMuscleStrengthScale (see AMutoRLTrainingDriver's own field of the
+	 * same name) is applied uniformly on top of every DOF's result, curve or
+	 * not — a single knob for "how strong are this rig's muscles overall",
+	 * independent of MaxTorquePerDOF (which caps the POLICY's commanded
+	 * torque, not what the muscle can actually deliver) and independent of
+	 * each DOF's own authored ExtensionStrength/FlexionStrength (which shape
+	 * the RELATIVE strength across muscles, not the absolute scale).
 	 */
-	void ComputeMuscleMultipliers(const FCreatureBatchState& Batch)
+	void ComputeMuscleMultipliers(const FCreatureBatchState& Batch, float GlobalMuscleStrengthScale)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
 		const int32 NumDOF = Topo.NumDOF;
@@ -1251,9 +1260,13 @@ private:
 		{
 			if (!Topo.DOFHasMuscleCurve[DOF])
 			{
+				// No authored curve doesn't mean no muscle -- GlobalMuscleStrengthScale
+				// still applies uniformly so it scales EVERY DOF's actuation, not just
+				// the ones with per-angle curve data (e.g. Muto's still-unarticulated
+				// spine, or any synthetic test topology).
 				for (int32 Env = 0; Env < NumEnvs; ++Env)
 				{
-					MuscleMultiplierAcc[Batch.DOFIndex(DOF, Env)] = 1.0f;
+					MuscleMultiplierAcc[Batch.DOFIndex(DOF, Env)] = GlobalMuscleStrengthScale;
 				}
 				return;
 			}
@@ -1287,7 +1300,7 @@ private:
 				const float CurveVal = (Torque >= 0.0f)
 					? ExtStrength * (ExtCurve ? ExtCurve->Eval(T) : 1.0f)
 					: FlexStrength * (FlexCurve ? FlexCurve->Eval(T) : 1.0f);
-				MuscleMultiplierAcc[Idx] = FMath::Max(CurveVal, 0.0f);
+				MuscleMultiplierAcc[Idx] = FMath::Max(CurveVal, 0.0f) * GlobalMuscleStrengthScale;
 			}
 		});
 	}

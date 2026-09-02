@@ -216,8 +216,8 @@ void AMutoRagdollVisualizerActor::Tick(float DeltaTime)
 	{
 		TraceHeartbeatCounter = 0;
 		const float TorsoZ = Topo.NumBodies > 0 ? (float)Batch.GetBodyPos(0, 0).Z : 0.0f;
-		UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRagdollVisualizerActor: physics-tick heartbeat -- bPaused=%d bDiverged=%d simTime=%.2f torsoZ=%.2f."),
-			bPaused, bDiverged, SimTime, TorsoZ);
+		//UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRagdollVisualizerActor: physics-tick heartbeat -- bPaused=%d bDiverged=%d simTime=%.2f torsoZ=%.2f."),
+		//	bPaused, bDiverged, SimTime, TorsoZ);
 	}
 }
 

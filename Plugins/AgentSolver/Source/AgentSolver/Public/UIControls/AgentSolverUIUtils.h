@@ -32,13 +32,22 @@ namespace AgentSolverUI
 	 * happens to iterate first. Use FindRagdollVisualizer/FindRLVisualizer
 	 * below to look for those specifically.
 	 */
-	AMutoRLTrainingDriver* FindTrainingDriver();
+	// AGENTSOLVER_API on every function here -- these are free functions in a
+	// namespace, not class members, so unlike UAgentSolverPreset etc. they
+	// need an explicit export macro to be linkable from another module's DLL
+	// at all. Missing entirely until the AgentSolverEditor module's live PIE
+	// polling (SGraphNode_LearningProgram) became the first caller from
+	// outside AgentSolver itself -- every previous caller (the control
+	// panel, the embedded viewport client) links into the SAME DLL, where an
+	// unexported symbol still resolves fine, so this was never caught.
+
+	AGENTSOLVER_API AMutoRLTrainingDriver* FindTrainingDriver();
 
 	/** Same world-selection rule as FindTrainingDriver, but for the ragdoll playback actor (AMutoRagdollVisualizerActor) specifically -- see EAgentSolverViewportSource. */
-	AMutoRagdollVisualizerActor* FindRagdollVisualizer();
+	AGENTSOLVER_API AMutoRagdollVisualizerActor* FindRagdollVisualizer();
 
 	/** Same world-selection rule as FindTrainingDriver, but for the policy-inference playback actor (AMutoRLVisualizerActor) specifically -- see EAgentSolverViewportSource. */
-	AMutoRLVisualizerActor* FindRLVisualizer();
+	AGENTSOLVER_API AMutoRLVisualizerActor* FindRLVisualizer();
 
 	/**
 	 * Dispatches to FindRagdollVisualizer/FindRLVisualizer based on Source --
@@ -47,7 +56,7 @@ namespace AgentSolverUI
 	 * EAgentSolverViewportSource pointing at right now" from, so the two
 	 * can never disagree about it.
 	 */
-	AMutoRLTrainingDriver* FindViewportSourceActor(EAgentSolverViewportSource Source);
+	AGENTSOLVER_API AMutoRLTrainingDriver* FindViewportSourceActor(EAgentSolverViewportSource Source);
 
 	/**
 	 * True only when a PIE session is actually running (GEditor->PlayWorld is
@@ -61,5 +70,5 @@ namespace AgentSolverUI
 	 * thread, all against a world that PIE never intended and that never
 	 * gets torn down the way a PIE world does on Stop.
 	 */
-	bool IsPIERunning();
+	AGENTSOLVER_API bool IsPIERunning();
 }

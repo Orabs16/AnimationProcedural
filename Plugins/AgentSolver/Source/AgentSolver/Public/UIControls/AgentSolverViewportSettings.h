@@ -12,6 +12,7 @@
 #include "AgentSolverViewportSettings.generated.h"
 
 class UWorld;
+class UAgentSolverPreset;
 
 /** Which actor's live pose the embedded viewport reads every frame -- see AgentSolverUI::FindViewportSourceActor, which this maps directly onto. */
 UENUM(BlueprintType)
@@ -52,4 +53,15 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, Category = "Viewport")
 	TSoftObjectPtr<UWorld> EnvironmentLevel;
+
+	/**
+	 * The active AgentSolverPreset -- see AgentSolverPreset.h. Picking a
+	 * different one here applies it (SAgentSolverControlPanel::LoadPreset,
+	 * triggered from this view's OnFinishedChangingProperties). NOT the same
+	 * thing as EnvironmentLevel above: that's cosmetic preview-scene
+	 * geometry only and is never opened; the preset's OWN EnvironmentLevel
+	 * field is the level that actually gets loaded when a preset is applied.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Viewport|Preset")
+	TObjectPtr<UAgentSolverPreset> ActivePreset;
 };

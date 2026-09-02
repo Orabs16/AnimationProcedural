@@ -24,11 +24,55 @@
 #include "CoreMinimal.h"
 #include "PhysicsSolver/CreatureBatchState.h"
 #include "PhysicsSolver/CreatureGroundContact.h"
+#include "AgentSolver/CreatureImitation.h"
 
 namespace CreatureRLEnvironment
 {
 	using CreatureGroundContact::FContactPointDef;
 	using CreatureGroundContact::FContactPointState;
+
+	/**
+	 * What the agent is being trained to do. Deliberately an exclusive MODE
+	 * rather than a set of weights that can all be on at once: the standing
+	 * objective's uprightness/balance/torso-height terms and an imitation
+	 * target are two different opinions about where the body should be, and
+	 * leaving both live means they quietly pull against each other whenever
+	 * the reference pose is anything but a symmetric upright stand. Alive
+	 * bonus, torque penalty and the energy/muscle maluses are shared by both
+	 * modes -- those are costs, not objectives, and are meaningful either way.
+	 */
+	enum class EObjectiveMode : uint8
+	{
+		Standing = 0,
+		Imitation = 1,
+	};
+
+	/**
+	 * The imitation reward's per-step inputs. Passed by pointer to
+	 * ComputeReward so the standing path costs nothing and so every existing
+	 * caller (and every existing test) keeps compiling untouched.
+	 *
+	 * Frame is sampled PER ENV, not once per step: reference state
+	 * initialization gives each episode its own starting phase, so at any
+	 * instant the 256 parallel envs are spread across the whole clip.
+	 */
+	struct FImitationTarget
+	{
+		const CreatureImitation::FReferenceFrame* Frame = nullptr;
+		const TArray<int32>* EndEffectorBodies = nullptr;
+
+		/** Height the batch's torso stands at in the rest pose -- the baseline FReferenceFrame::RootHeightAboveRest is applied on top of. */
+		float RestTorsoHeight = 100.0f;
+	};
+
+	/** The four imitation terms, for the control panel's per-component graphs. Same purpose as ComputeReward's existing Out* pointers. */
+	struct FImitationBreakdown
+	{
+		float PoseReward = 0.0f;
+		float VelocityReward = 0.0f;
+		float EndEffectorReward = 0.0f;
+		float RootReward = 0.0f;
+	};
 
 	struct FEnvConfig
 	{
@@ -92,6 +136,23 @@ namespace CreatureRLEnvironment
 		// this value, which would squash the weak joints along with the strong ones.
 		float MaxTorquePerDOF = 5.0e7f;
 
+		// Uniform curriculum knob on top of every DOF's authored
+		// MuscleActivationThreshold (see ApplyActions below): the EFFECTIVE
+		// threshold used each step is DOFMuscleActivationThreshold * this
+		// multiplier, not the authored value directly. 1.0 (default)
+		// reproduces the authored thresholds exactly. Added because a fresh
+		// PPO policy's actions start clustered near 0, so the full authored
+		// 0.2 threshold applied from step one can gate off every DOF's small
+		// corrective torques before the policy ever has a chance to learn to
+		// push past it -- set this to 0 at the start of training (no gating
+		// at all, so early exploration can find a working balance policy
+		// unobstructed) and ramp it up toward 1.0 over the course of
+		// training, once the policy already knows how to move, to
+		// reintroduce the modeled recruitment threshold. Live-tunable: see
+		// UMutoRLTrainingEnvironment::GatherAgentReward_Implementation's
+		// per-step Config refresh.
+		float MuscleActivationThresholdMultiplier = 1.0f;
+
 		// "Fallen over" termination thresholds.
 		float MinUprightDot = 0.5f;    // dot(TorsoUp, WorldUp) below this ends the episode
 		float MinHeightFraction = 0.5f; // torso height below this fraction of TargetTorsoHeight ends the episode
@@ -113,14 +174,101 @@ namespace CreatureRLEnvironment
 		float RewardHeightMultiplier = 1.0f;
 		float RewardEnergyConsumptionMultiplier = 1.0f;
 		float RewardMusclesUseMultiplier = 1.0f;
+
+		// Final multiplier applied to the fully-summed reward (see
+		// ComputeReward's own return statement) -- AFTER every term above,
+		// not another term alongside them. Lets the whole reward's scale be
+		// rescaled in one place (e.g. to compensate for a change elsewhere,
+		// or to bring it in line with what feels responsive during PPO
+		// training) without re-deriving every individual weight above.
+		float GlobalRewardScale = 1.0f;
+
+		// Added AFTER GlobalRewardScale (Reward*Scale + Offset, the standard
+		// linear rescale order) -- shifts the whole reward's baseline, e.g.
+		// to make "doing nothing" net to a specific target value rather than
+		// whatever the summed terms happen to land on.
+		float GlobalRewardOffset = 0.0f;
+
+		// ----- Imitation (see CreatureImitation.h) -----
+
+		/** Standing (the original objective) or Imitation. See EObjectiveMode. */
+		EObjectiveMode ObjectiveMode = EObjectiveMode::Standing;
+
+		/** Weights and falloff rates for the four imitation terms; only read when ObjectiveMode == Imitation. */
+		CreatureImitation::FImitationConfig Imitation;
+
+		/**
+		 * Appends [sin(2*pi*phase), cos(2*pi*phase)] to the observation, so
+		 * the policy knows WHERE IN THE CLIP it is. Required for imitating an
+		 * animation and pointless for a single pose (whose target never
+		 * changes, leaving the phase a constant the network would have to
+		 * learn to ignore).
+		 *
+		 * Sine/cosine rather than the raw phase because the raw value jumps
+		 * from 1 back to 0 at the loop point, and a discontinuity in an
+		 * observation is a discontinuity the policy has to model around;
+		 * the (sin, cos) pair is continuous through the wrap.
+		 *
+		 * CHANGES GetObservationSize, and therefore the network's input shape
+		 * -- a policy trained with this off cannot be loaded with it on, or
+		 * vice versa. That is why it is a separate flag from ObjectiveMode
+		 * rather than implied by it: pose imitation (phase 1) keeps the
+		 * existing layout and stays compatible with already-saved networks.
+		 */
+		bool bAppendPhaseObservation = false;
 	};
 
-	/** Observation layout: [TorsoUp.XYZ, TorsoLinVel.XYZ, TorsoAngVel.XYZ, TorsoHeight-Target, (JointPos,JointVel) x NumDOF, (bTouching,NormalForce) x NumContactPoints]. */
-	inline int32 GetObservationSize(const FCreatureTopology& Topo, int32 NumContactPoints)
+	/** Observation layout: [TorsoUp.XYZ, TorsoLinVel.XYZ, TorsoAngVel.XYZ, TorsoHeight-Target, (JointPos,JointVel) x NumDOF, (bTouching,NormalForce) x NumContactPoints, and — only when bAppendPhase — (sin,cos) of the reference motion's phase]. Every component below is normalized to roughly [-1,1] before being packed -- see ComputeObservations' own comment for why and how. */
+	inline int32 GetObservationSize(const FCreatureTopology& Topo, int32 NumContactPoints, bool bAppendPhase = false)
 	{
-		return 10 + 2 * Topo.NumDOF + 2 * NumContactPoints;
+		return 10 + 2 * Topo.NumDOF + 2 * NumContactPoints + (bAppendPhase ? 2 : 0);
 	}
 
+	/**
+	 * ULearningAgentsObservations::SpecifyContinuousObservation (see
+	 * UMutoRLInteractor::SpecifyAgentObservation_Implementation) is called
+	 * with its default Scale=1.0, applied UNIFORMLY across this whole flat
+	 * vector -- it cannot rescale individual components differently. Below,
+	 * TorsoUp.XYZ is already a unit vector (~[-1,1]) but everything else was
+	 * being packed in RAW physical units: linear/angular velocity in cm/s
+	 * and rad/s (often tens to hundreds), a height delta in the same raw cm
+	 * units as TargetTorsoHeight (~400 in this project), and contact
+	 * NormalForce at whatever magnitude this rig's mass/torque regime
+	 * produces -- all sitting next to near-unit-scale components in the same
+	 * vector, with nothing to bring them onto a comparable scale. Badly-
+	 * conditioned inputs like this are a well-known source of unstable
+	 * gradients/NaN weights in NN training, independent of anything reward-
+	 * related (see AMutoRLTrainingDriver's constructor for the OTHER,
+	 * already-diagnosed NaN-collapse mechanism, ActionEntropyWeight/
+	 * ActionRegularizationWeight/GradNormMax -- this is a separate
+	 * contributor, not a duplicate fix for the same one).
+	 *
+	 * Each raw component below is now divided by a reference scale chosen to
+	 * bring TYPICAL values roughly into [-1,1] (an occasional larger swing,
+	 * e.g. during a fall, is fine -- exactly what a network with normalized-
+	 * but-unclamped inputs is expected to handle):
+	 *  - LinVelocityScale (200 cm/s = 2 m/s) matches Epic's own
+	 *    ULearningAgentsObservations::SpecifyVelocityObservation's default
+	 *    VelocityScale, chosen for the exact same raw-cm/s-is-too-large
+	 *    reason.
+	 *  - AngVelocityScale (2*PI rad/s = one full rotation/second) has no
+	 *    engine-provided default to match (Learning Agents has no typed
+	 *    angular-velocity observation helper) -- picked as a "fast but not
+	 *    yet a blowup" reference for this rig.
+	 *  - The height delta is divided by Config.TargetTorsoHeight itself,
+	 *    not a magic constant -- this rig's own standing height is the
+	 *    natural reference scale for "how far off the ground is too far",
+	 *    and stays correct if TargetTorsoHeight is ever retuned or this code
+	 *    is reused for a differently-sized rig.
+	 *  - JointPos (already radians) is divided by PI, the natural reference
+	 *    for an angle in radians.
+	 *  - JointVel reuses AngVelocityScale (same units as TorsoAngVel).
+	 *  - NormalForce is divided by Config.MaxTorquePerDOF -- not a literal
+	 *    force/torque unit conversion, but the same reasoning ComputeReward's
+	 *    own TorquePenalty/EnergyConsumptionMalus/MusclesUseMalus terms
+	 *    already use it for: it's this rig's own characteristic strength
+	 *    scale, available without introducing yet another magic number.
+	 */
 	inline void ComputeObservations(
 		const FCreatureBatchState& Batch,
 		int32 Env,
@@ -128,39 +276,55 @@ namespace CreatureRLEnvironment
 		const TArray<FContactPointDef>& ContactPoints,
 		const TArray<FContactPointState>& ContactStates, // ContactPoints.Num() x NumEnvsForContacts, see ApplyGroundContactForces's OutState layout
 		int32 NumEnvsForContacts,
-		TArray<float>& OutObservation)
+		TArray<float>& OutObservation,
+		float Phase = 0.0f)
 	{
+		constexpr float LinVelocityScale = 200.0f;
+		constexpr float AngVelocityScale = 2.0f * PI;
+
 		const FCreatureTopology& Topo = Batch.GetTopology();
-		OutObservation.Reset(GetObservationSize(Topo, ContactPoints.Num()));
+		OutObservation.Reset(GetObservationSize(Topo, ContactPoints.Num(), Config.bAppendPhaseObservation));
 
 		const FQuat TorsoRot = Batch.GetBodyRot(0, Env);
 		const FVector TorsoUp = TorsoRot.RotateVector(Config.LocalUpAxis);
 		const int32 TorsoIdx = Batch.BodyIndex(0, Env);
+		const float SafeTargetTorsoHeight = FMath::Max(Config.TargetTorsoHeight, KINDA_SMALL_NUMBER);
+		const float SafeMaxTorquePerDOF = FMath::Max(Config.MaxTorquePerDOF, KINDA_SMALL_NUMBER);
 
 		OutObservation.Add((float)TorsoUp.X);
 		OutObservation.Add((float)TorsoUp.Y);
 		OutObservation.Add((float)TorsoUp.Z);
-		OutObservation.Add(Batch.LinVelX[TorsoIdx]);
-		OutObservation.Add(Batch.LinVelY[TorsoIdx]);
-		OutObservation.Add(Batch.LinVelZ[TorsoIdx]);
-		OutObservation.Add(Batch.AngVelX[TorsoIdx]);
-		OutObservation.Add(Batch.AngVelY[TorsoIdx]);
-		OutObservation.Add(Batch.AngVelZ[TorsoIdx]);
+		OutObservation.Add(Batch.LinVelX[TorsoIdx] / LinVelocityScale);
+		OutObservation.Add(Batch.LinVelY[TorsoIdx] / LinVelocityScale);
+		OutObservation.Add(Batch.LinVelZ[TorsoIdx] / LinVelocityScale);
+		OutObservation.Add(Batch.AngVelX[TorsoIdx] / AngVelocityScale);
+		OutObservation.Add(Batch.AngVelY[TorsoIdx] / AngVelocityScale);
+		OutObservation.Add(Batch.AngVelZ[TorsoIdx] / AngVelocityScale);
 		const float HeightAboveGround = (float)Batch.GetBodyPos(0, Env).Z - Config.GroundZ;
-		OutObservation.Add(HeightAboveGround - Config.TargetTorsoHeight);
+		OutObservation.Add((HeightAboveGround - Config.TargetTorsoHeight) / SafeTargetTorsoHeight);
 
 		for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
 		{
 			const int32 DOFIdx = Batch.DOFIndex(DOF, Env);
-			OutObservation.Add(Batch.JointPos[DOFIdx]);
-			OutObservation.Add(Batch.JointVel[DOFIdx]);
+			OutObservation.Add(Batch.JointPos[DOFIdx] / PI);
+			OutObservation.Add(Batch.JointVel[DOFIdx] / AngVelocityScale);
 		}
 
 		for (int32 PointIdx = 0; PointIdx < ContactPoints.Num(); ++PointIdx)
 		{
 			const FContactPointState& State = ContactStates[PointIdx * NumEnvsForContacts + Env];
 			OutObservation.Add(State.bTouching ? 1.0f : 0.0f);
-			OutObservation.Add(State.NormalForce);
+			OutObservation.Add(State.NormalForce / SafeMaxTorquePerDOF);
+		}
+
+		// Where in the reference clip this env currently is. Already in
+		// [-1,1] by construction, so it needs none of the normalization the
+		// components above do. See FEnvConfig::bAppendPhaseObservation for
+		// why this is a (sin, cos) pair and not the raw phase.
+		if (Config.bAppendPhaseObservation)
+		{
+			OutObservation.Add(FMath::Sin(2.0f * PI * Phase));
+			OutObservation.Add(FMath::Cos(2.0f * PI * Phase));
 		}
 
 		// Same reasoning as ComputeReward's own IsFinite fallback, and the
@@ -175,16 +339,48 @@ namespace CreatureRLEnvironment
 		// path (a single scalar), a blown-up state can leave ANY subset of
 		// these floats non-finite, not just one -- sanitize the whole vector
 		// in one pass rather than trying to guard each field individually.
+		// ObservationBlowupClamp: the IsFinite sanitize above only catches
+		// NaN/Inf -- the same blowup-reaches-here-for-one-step race can just
+		// as easily hand a field a huge but still-FINITE value (e.g.
+		// NormalForce mid-resonance, before IsBodyStateValid's own NaN/Inf
+		// check trips), which sails through untouched otherwise. Every field
+		// here is normalized to roughly [-1,1] in normal operation (see this
+		// function's own comment above) -- +-10 is generous headroom for any
+		// legitimate value while still bounding one bad step from feeding the
+		// encoder/critic an outlier several orders of magnitude out of
+		// distribution.
+		constexpr float ObservationBlowupClamp = 10.0f;
 		for (float& Value : OutObservation)
 		{
 			if (!FMath::IsFinite(Value))
 			{
 				Value = 0.0f;
 			}
+			else
+			{
+				Value = FMath::Clamp(Value, -ObservationBlowupClamp, ObservationBlowupClamp);
+			}
 		}
 	}
 
-	/** Normalized [-1,1] action per DOF -> Batch.JointTorque, scaled by Config.MaxTorquePerDOF. */
+	/**
+	 * Normalized [-1,1] action per DOF -> Batch.JointTorque, scaled by
+	 * Config.MaxTorquePerDOF. A muscle whose |normalized action| falls below
+	 * its authored Topo.DOFMuscleActivationThreshold (FMassMuscleDataMuscle::
+	 * MuscleActivationThreshold, default 0.2 — see that field's comment)
+	 * produces zero torque instead, same idea as a biological motor-unit
+	 * recruitment threshold. DOFs with no authored muscle default the
+	 * threshold to 0, so they activate at any nonzero command exactly as
+	 * before this was added.
+	 *
+	 * Above the threshold, the remaining action range [threshold,1] is
+	 * remapped to [0,1] before scaling by MaxTorquePerDOF, rather than using
+	 * the raw action directly -- a muscle crossing its threshold ramps UP
+	 * from zero torque, instead of instantly jumping to
+	 * threshold*MaxTorquePerDOF. Still a dead zone below the threshold (zero
+	 * torque, zero gradient, by design), but continuous at the boundary
+	 * itself instead of having a discontinuous jump there.
+	 */
 	inline void ApplyActions(FCreatureBatchState& Batch, int32 Env, const TArray<float>& NormalizedActions, const FEnvConfig& Config)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
@@ -192,7 +388,16 @@ namespace CreatureRLEnvironment
 		for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
 		{
 			const int32 DOFIdx = Batch.DOFIndex(DOF, Env);
-			Batch.JointTorque[DOFIdx] = FMath::Clamp(NormalizedActions[DOF], -1.0f, 1.0f) * Config.MaxTorquePerDOF;
+			const float ClampedAction = FMath::Clamp(NormalizedActions[DOF], -1.0f, 1.0f);
+			const float Threshold = FMath::Max(Topo.DOFMuscleActivationThreshold[DOF] * Config.MuscleActivationThresholdMultiplier, 0.0f);
+			const float Magnitude = FMath::Abs(ClampedAction);
+			float Torque = 0.0f;
+			if (Magnitude >= Threshold && Threshold < 1.0f)
+			{
+				const float Remapped = (Magnitude - Threshold) / (1.0f - Threshold);
+				Torque = FMath::Sign(ClampedAction) * Remapped * Config.MaxTorquePerDOF;
+			}
+			Batch.JointTorque[DOFIdx] = Torque;
 		}
 	}
 
@@ -254,21 +459,34 @@ namespace CreatureRLEnvironment
 
 	/**
 	 * Reward-Settings-pane "Energy Consumption" malus (see
-	 * AMutoRLTrainingDriver::RewardEnergyConsumptionMultiplier). Formula as
-	 * specified: sum the magnitude of every DOF's commanded torque ("the
-	 * forces applied by the muscles" -- Batch.JointTorque is this solver's
-	 * per-DOF torque/force channel), divide by 10000, multiply by
-	 * EnergyConsumptionMultiplier.
+	 * AMutoRLTrainingDriver::RewardEnergyConsumptionMultiplier): sum, across
+	 * DOFs, of the commanded torque's magnitude as a FRACTION of
+	 * MaxTorquePerDOF ("the forces applied by the muscles" -- Batch.JointTorque
+	 * is this solver's per-DOF torque/force channel), times
+	 * EnergyConsumptionMultiplier -- same [0, NumDOF] scale as
+	 * ComputeMusclesUseMalus below, and normalized against MaxTorquePerDOF for
+	 * the exact same reason TorquePenalty is in ComputeReward (see that
+	 * term's comment): this used to divide the RAW torque sum by a fixed
+	 * /10000, which was in-range back when MaxTorquePerDOF was the 5.0
+	 * placeholder value but silently became ~10,000,000x too small once
+	 * MaxTorquePerDOF was rescaled to 5.0e7 (see MaxTorquePerDOF's own
+	 * comment) -- e.g. a rig using ~65% of its torque budget across ~68 DOF
+	 * produced a malus around 220,000, versus every other reward term's
+	 * combined ~[-1,2.5] range, making this single term the entire reward
+	 * signal and drowning out any actual balance/uprightness gradient.
 	 */
-	inline float ComputeEnergyConsumptionMalus(const FCreatureBatchState& Batch, int32 Env, float EnergyConsumptionMultiplier)
+	inline float ComputeEnergyConsumptionMalus(const FCreatureBatchState& Batch, int32 Env, float MaxTorquePerDOF, float EnergyConsumptionMultiplier)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
-		float TotalForce = 0.0f;
-		for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
+		float TotalNormalizedForce = 0.0f;
+		if (MaxTorquePerDOF > KINDA_SMALL_NUMBER)
 		{
-			TotalForce += FMath::Abs(Batch.JointTorque[Batch.DOFIndex(DOF, Env)]);
+			for (int32 DOF = 0; DOF < Topo.NumDOF; ++DOF)
+			{
+				TotalNormalizedForce += FMath::Abs(Batch.JointTorque[Batch.DOFIndex(DOF, Env)]) / MaxTorquePerDOF;
+			}
 		}
-		return (TotalForce / 10000.0f) * EnergyConsumptionMultiplier;
+		return TotalNormalizedForce * EnergyConsumptionMultiplier;
 	}
 
 	/**
@@ -324,7 +542,9 @@ namespace CreatureRLEnvironment
 		int32 NumEnvsForContacts,
 		float* OutTorsoHeightBonus = nullptr,
 		float* OutEnergyConsumptionMalus = nullptr,
-		float* OutMusclesUseMalus = nullptr)
+		float* OutMusclesUseMalus = nullptr,
+		const FImitationTarget* ImitationTarget = nullptr,
+		FImitationBreakdown* OutImitation = nullptr)
 	{
 		const FCreatureTopology& Topo = Batch.GetTopology();
 		const FQuat TorsoRot = Batch.GetBodyRot(0, Env);
@@ -397,17 +617,47 @@ namespace CreatureRLEnvironment
 		}
 
 		const float TorsoHeightBonus = ComputeTorsoHeightBonus(Batch, Env, Config.RewardHeightTarget, Config.RewardHeightMultiplier);
-		const float EnergyConsumptionMalus = ComputeEnergyConsumptionMalus(Batch, Env, Config.RewardEnergyConsumptionMultiplier);
+		const float EnergyConsumptionMalus = ComputeEnergyConsumptionMalus(Batch, Env, Config.MaxTorquePerDOF, Config.RewardEnergyConsumptionMultiplier);
 		const float MusclesUseMalus = ComputeMusclesUseMalus(Batch, Env, Config.MaxTorquePerDOF, Config.RewardMusclesUseMultiplier);
 		if (OutTorsoHeightBonus) { *OutTorsoHeightBonus = TorsoHeightBonus; }
 		if (OutEnergyConsumptionMalus) { *OutEnergyConsumptionMalus = EnergyConsumptionMalus; }
 		if (OutMusclesUseMalus) { *OutMusclesUseMalus = MusclesUseMalus; }
 
-		const float Reward = Config.AliveBonus
-			+ Config.UprightWeight * UprightDot
-			+ Config.BalanceWeight * BalanceTerm
+		// The two objectives share their COSTS (alive bonus, torque penalty,
+		// energy/muscle maluses) and differ only in the task term. See
+		// EObjectiveMode for why this is exclusive rather than additive.
+		//
+		// Falls back to the standing terms if imitation is selected but no
+		// reference was supplied -- a missing/failed bake should degrade to
+		// the objective that has always worked, not to a reward of zero that
+		// looks like a broken policy.
+		float TaskTerm = 0.0f;
+		const bool bImitating = (Config.ObjectiveMode == EObjectiveMode::Imitation)
+			&& ImitationTarget != nullptr && ImitationTarget->Frame != nullptr;
+
+		if (bImitating)
+		{
+			static const TArray<int32> EmptyEndEffectors;
+			FImitationBreakdown Breakdown;
+			TaskTerm = CreatureImitation::ComputeImitationReward(
+				Batch, Env, *ImitationTarget->Frame,
+				ImitationTarget->EndEffectorBodies ? *ImitationTarget->EndEffectorBodies : EmptyEndEffectors,
+				Config.GroundZ, ImitationTarget->RestTorsoHeight, Config.TargetTorsoHeight,
+				Config.Imitation,
+				&Breakdown.PoseReward, &Breakdown.VelocityReward,
+				&Breakdown.EndEffectorReward, &Breakdown.RootReward);
+			if (OutImitation) { *OutImitation = Breakdown; }
+		}
+		else
+		{
+			TaskTerm = Config.UprightWeight * UprightDot
+				+ Config.BalanceWeight * BalanceTerm
+				+ TorsoHeightBonus;
+		}
+
+		const float RawReward = Config.AliveBonus
+			+ TaskTerm
 			- Config.TorquePenaltyWeight * TorquePenalty
-			+ TorsoHeightBonus
 			- EnergyConsumptionMalus
 			- MusclesUseMalus;
 
@@ -415,17 +665,31 @@ namespace CreatureRLEnvironment
 		// here for the one step where the corrupted state's reward/completion
 		// are gathered together, BEFORE IsTerminated below has a chance to
 		// force the reset — never hand the trainer a NaN/Inf reward sample
-		// for that step. Falls back to 0 (in-distribution: normal reward
-		// here is roughly [-0.1, 2.5]), not a large negative "punishment"
-		// value — a blowup is a numerical artifact of THIS simulation, not
-		// something the agent chose, and (with bUseGradNormMaxClipping now
-		// on, see AMutoRLTrainingDriver's constructor) an earlier, larger
-		// fallback here was a real suspect for repeatedly injecting
-		// out-of-distribution reward outliers into PPO's advantage/critic
-		// statistics across however many of the (256, by default) parallel
-		// envs blow up at any given time — plausibly contributing to the
-		// exact kind of rare gradient-explosion event that produces NaN
-		// network weights after an otherwise-fine training run.
+		// for that step, NOR a finite-but-astronomical one: TorquePenalty/
+		// EnergyConsumptionMalus/MusclesUseMalus are unbounded sums over
+		// Batch.JointTorque, so a blowup can hand them a huge but still-finite
+		// value that the IsFinite check alone doesn't catch (confirmed via
+		// TensorBoard: a one-frame ~-5e6 return spike, finite the whole way,
+		// landing right when grads/critic and grads/policy also spike).
+		// Clamped on this RAW, pre-Scale/Offset sum (not the final Reward
+		// below) so the bound stays meaningful regardless of the user's own
+		// GlobalRewardScale/Offset tuning — normal RawReward here is roughly
+		// [-0.1, 2.5], so +-10 is generous headroom that never clips a real
+		// reward. Falls back to 0 for non-finite (in-distribution), not a
+		// large negative "punishment" value — a blowup is a numerical
+		// artifact of THIS simulation, not something the agent chose, and
+		// (with bUseGradNormMaxClipping now on, see AMutoRLTrainingDriver's
+		// constructor) an earlier, larger fallback here was a real suspect for
+		// repeatedly injecting out-of-distribution reward outliers into PPO's
+		// advantage/critic statistics across however many of the (256, by
+		// default) parallel envs blow up at any given time — plausibly
+		// contributing to the exact kind of rare gradient-explosion event
+		// that produces NaN network weights after an otherwise-fine training
+		// run.
+		constexpr float RawRewardBlowupClamp = 10.0f;
+		const float ClampedRawReward = FMath::IsFinite(RawReward) ? FMath::Clamp(RawReward, -RawRewardBlowupClamp, RawRewardBlowupClamp) : 0.0f;
+
+		const float Reward = Config.GlobalRewardScale * ClampedRawReward + Config.GlobalRewardOffset;
 		return FMath::IsFinite(Reward) ? Reward : 0.0f;
 	}
 
@@ -558,8 +822,12 @@ namespace CreatureRLEnvironment
 	 * Tick) should pass them.
 	 */
 	inline bool IsTerminated(const FCreatureBatchState& Batch, int32 Env, const FEnvConfig& Config,
-		const TArray<FContactPointState>* ContactStates = nullptr, int32 NumContactPoints = 0, int32 NumEnvsForContacts = 1)
+		const TArray<FContactPointState>* ContactStates = nullptr, int32 NumContactPoints = 0, int32 NumEnvsForContacts = 1,
+		const FImitationTarget* ImitationTarget = nullptr)
 	{
+		// Blowup guards are unconditional in BOTH objectives -- they are not
+		// task logic, they are the only thing standing between a NaN and a
+		// hard assert inside Learning Agents (see IsBodyStateValid).
 		if (!IsBodyStateValid(Batch, Env))
 		{
 			return true;
@@ -568,6 +836,29 @@ namespace CreatureRLEnvironment
 		{
 			return true;
 		}
+
+		if (Config.ObjectiveMode == EObjectiveMode::Imitation)
+		{
+			// Imitation's analogue of "fallen over": once the pose has drifted
+			// far enough from the reference there is nothing further to learn
+			// from this episode, and ending it is what keeps the replay buffer
+			// populated with states the reference motion actually visits.
+			if (Config.Imitation.MaxPoseErrorRad > 0.0f && ImitationTarget && ImitationTarget->Frame)
+			{
+				if (CreatureImitation::ComputeMeanPoseErrorRad(Batch, Env, *ImitationTarget->Frame) > Config.Imitation.MaxPoseErrorRad)
+				{
+					return true;
+				}
+			}
+			// A reference motion is not necessarily an upright stand -- a
+			// crawl, a roll or a get-up would trip these thresholds on frame
+			// one, ending every episode before the policy sees any of it.
+			if (!Config.Imitation.bTerminateOnUprightAndHeight)
+			{
+				return false;
+			}
+		}
+
 		const FQuat TorsoRot = Batch.GetBodyRot(0, Env);
 		const float UprightDot = (float)FVector::DotProduct(TorsoRot.RotateVector(Config.LocalUpAxis), FVector::UpVector);
 		const float HeightAboveGround = (float)Batch.GetBodyPos(0, Env).Z - Config.GroundZ;

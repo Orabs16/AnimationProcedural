@@ -82,6 +82,8 @@ private:
     void OnExtensionStrengthChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->ExtensionStrength = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
     TOptional<float> GetFlexionStrength() const{return SelectedMuscle ? SelectedMuscle->FlexionStrength : 0;}
     void OnFlexionStrengthChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->FlexionStrength = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
+    TOptional<float> GetMuscleActivationThreshold() const{return SelectedMuscle ? SelectedMuscle->MuscleActivationThreshold : 0;}
+    void OnMuscleActivationThresholdChanged(float value) const {if(SelectedMuscle){ SelectedMuscle->MuscleActivationThreshold = value; SMassMuscleDetailsPannel::MarkDirtyMuscle(); }}
 
     ECheckBoxState GetCanTouchGround() const
     {

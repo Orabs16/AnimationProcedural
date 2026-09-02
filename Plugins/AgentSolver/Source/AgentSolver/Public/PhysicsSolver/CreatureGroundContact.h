@@ -2009,9 +2009,23 @@ namespace CreatureGroundContact
 					(DebugLog && Env == 0) ? DebugLog : nullptr);
 			});
 			const double SolveEndTime = FPlatformTime::Seconds();
-			UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] CreatureGroundContact::ResolveGroundContactImpulses: numEnvs=%d gatherMs=%.2f solveMs=%.2f active=%d pairs=%d limitRows=%d ballLimitRows=%d"),
-				NumEnvs, (GatherEndTime - GatherStartTime) * 1000.0, (SolveEndTime - GatherEndTime) * 1000.0,
-				Active.Num(), ActivePairs.Num(), LimitRows.Num(), BallLimitRows.Num());
+			// This runs once per substep (many per training step), unlike every
+			// other "[AS-TRACE]" heartbeat in this project (all throttled to
+			// roughly once/second — see FAgentSolverViewportClient.cpp's
+			// TraceHeartbeatInterval) — logging it unconditionally was fine for
+			// the 2026-08-25 gather/solve split-timing investigation this was
+			// added for, but during a real training run it floods the log
+			// (hundreds of thousands of lines in minutes), burying everything
+			// else. Same throttle pattern, gated on call count rather than time
+			// since this has no Tick() of its own to hang a timer off of.
+			static int32 TraceCallCounter = 0;
+			constexpr int32 TraceHeartbeatInterval = 200;
+			if (++TraceCallCounter % TraceHeartbeatInterval == 0)
+			{
+				//UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] CreatureGroundContact::ResolveGroundContactImpulses: numEnvs=%d gatherMs=%.2f solveMs=%.2f active=%d pairs=%d limitRows=%d ballLimitRows=%d"),
+				//	NumEnvs, (GatherEndTime - GatherStartTime) * 1000.0, (SolveEndTime - GatherEndTime) * 1000.0,
+				//	Active.Num(), ActivePairs.Num(), LimitRows.Num(), BallLimitRows.Num());
+			}
 		}
 		else
 		{

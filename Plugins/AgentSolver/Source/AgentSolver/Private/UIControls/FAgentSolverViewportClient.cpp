@@ -168,8 +168,8 @@ void FAgentSolverViewportClient::RefreshPoseFromSource()
 	{
 		CurrentSkeletalMesh = SourceActor->SkeletalMesh;
 		PreviewMeshComponent->SetSkinnedAssetAndUpdate(SourceActor->SkeletalMesh);
-		UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] FAgentSolverViewportClient: mesh-show -- SetSkinnedAssetAndUpdate('%s') on %s actor '%s'."),
-			*SourceActor->SkeletalMesh->GetName(), LexViewportSource(Source), *SourceActor->GetName());
+		//UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] FAgentSolverViewportClient: mesh-show -- SetSkinnedAssetAndUpdate('%s') on %s actor '%s'."),
+		//	*SourceActor->SkeletalMesh->GetName(), LexViewportSource(Source), *SourceActor->GetName());
 	}
 
 	// No lock needed here: Ragdoll/Visualizer only ever mutate their own

@@ -282,6 +282,27 @@ void SMassMuscleDetailsPannel::Construct(const FArguments& InArgs)
                 SNew(SMassMuscleItemRow)
                 +SMassMuscleItemRow::Slot()
                 [
+                     SNew(STextBlock).Text(FText::FromString("Activation threshold"))
+                ]
+                +SMassMuscleItemRow::Slot()
+                [
+                    SNew(SNumericEntryBox<float>)
+                    .Value(this, &SMassMuscleDetailsPannel::GetMuscleActivationThreshold)
+                    .OnValueChanged(this, &SMassMuscleDetailsPannel::OnMuscleActivationThresholdChanged)
+                    .AllowSpin(true)
+                    .Delta(0.01f)
+                    .LinearDeltaSensitivity(1)
+                    .MinValue(0.0f)
+                    .MaxValue(1.0f)
+                    .MinSliderValue(0.0f)
+                    .MaxSliderValue(1.0f)
+                ]
+            ]
+            +SMassMuscleExpandableSection::Slot()
+            [
+                SNew(SMassMuscleItemRow)
+                +SMassMuscleItemRow::Slot()
+                [
                      SNew(STextBlock).Text(FText::FromString("Orientation"))
                 ]
                 +SMassMuscleItemRow::Slot()

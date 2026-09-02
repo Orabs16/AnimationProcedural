@@ -6,9 +6,13 @@
 #include "UIControls/SAgentSolverViewport.h"
 #include "UIControls/SAgentSolverLineGraph.h"
 #include "AgentSolver/MutoRLTrainingDriver.h"
+#include "AgentSolver/AgentSolverPreset.h"
 #include "Components/PoseableMeshComponent.h"
 #include "UIControls/LearningAgentsNeuralNetworkFactory.h"
+#include "UIControls/AgentSolverPresetFactory.h"
 #include "LearningAgentsNeuralNetwork.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
 
 #include "DetailsViewArgs.h"
 #include "IDetailsView.h"
@@ -50,7 +54,13 @@ namespace
 	// Agent tab's details view like everything else, since IDetailsView
 	// already renders object-reference properties as asset pickers for free;
 	// building bespoke rows on top just duplicated them.
-	const TArray<FString> AgentParameterCategoryPrefixes = { TEXT("Muto RL|Rig"), TEXT("Muto RL|Reward"), TEXT("Muto RL|Reset"), TEXT("Muto RL|Training"), TEXT("Muto RL|Learning") };
+	// "Muto RL|Imitation" is the STRUCTURAL imitation block (objective mode,
+	// the clip, bake settings, end-effector names) -- read once by
+	// StartTraining, so it belongs with the other setup values here rather
+	// than in the always-visible Reward Settings pane, which is for knobs that
+	// respond live. The imitation WEIGHTS live under "Muto RL|Tuning|Imitation"
+	// and are picked up by RewardSettingsCategoryPrefixes below instead.
+	const TArray<FString> AgentParameterCategoryPrefixes = { TEXT("Muto RL|Rig"), TEXT("Muto RL|Reward"), TEXT("Muto RL|Reset"), TEXT("Muto RL|Training"), TEXT("Muto RL|Learning"), TEXT("Muto RL|Imitation") };
 	const TArray<FString> PhysicsParameterCategoryPrefixes = { TEXT("Muto RL|Simulation"), TEXT("Muto RL|Contact"), TEXT("Muto RL|Diagnostics") };
 	// Deliberately "Muto RL|Tuning", not "Muto RL|Reward" -- see
 	// AMutoRLTrainingDriver::RewardHeightTarget's comment: nesting under
@@ -60,7 +70,16 @@ namespace
 	// "Muto RL|Simulation|Gravity" is Gravity specifically (see its own
 	// comment) -- deliberately NOT the bare "Muto RL|Simulation", which would
 	// also pull in bAutoStartOnBeginPlay/NumEnvs/etc. from the Physics tab.
-	const TArray<FString> RewardSettingsCategoryPrefixes = { TEXT("Muto RL|Tuning"), TEXT("Muto RL|Simulation|Gravity") };
+	// "Muto RL|Reward|Core Weights"/"Torque"/"Termination" (2026-08-25) are
+	// AliveBonus/UprightWeight/BalanceWeight/TorquePenaltyWeight/
+	// MaxTorquePerDOF/MinUprightDot/MinHeightFraction specifically -- same
+	// Gravity-style dual-tab trick, deliberately NOT the bare "Muto
+	// RL|Reward", which would also pull in TargetTorsoHeightOverride (a
+	// structural setup value, not a tuning knob) from the Agent tab.
+	const TArray<FString> RewardSettingsCategoryPrefixes = {
+		TEXT("Muto RL|Tuning"), TEXT("Muto RL|Simulation|Gravity"),
+		TEXT("Muto RL|Reward|Core Weights"), TEXT("Muto RL|Reward|Torque"), TEXT("Muto RL|Reward|Termination")
+	};
 
 	// How often Tick() pushes a new sample into the reward/throughput graphs.
 	// Sub-second would just make the graph noisy without adding information
@@ -173,6 +192,34 @@ namespace
 						.DisplayThumbnail(true)
 					];
 			}
+
+			// Same "create new" (+) treatment for the Viewport tab's preset
+			// picker row (UAgentSolverViewportSettings::ActivePreset) --
+			// GetProperty() on this object's-own-class-only lookup returns an
+			// invalid handle when this customization runs for
+			// AMutoRLTrainingDriver/UPoseableMeshComponent instead, same
+			// guard as the network-asset loop above.
+			static TStrongObjectPtr<UAgentSolverPresetFactory> PresetFactory(NewObject<UAgentSolverPresetFactory>());
+			TSharedRef<IPropertyHandle> PresetHandle = DetailBuilder.GetProperty(
+				GET_MEMBER_NAME_CHECKED(UAgentSolverViewportSettings, ActivePreset), UAgentSolverViewportSettings::StaticClass());
+			if (IDetailPropertyRow* PresetRow = DetailBuilder.EditDefaultProperty(PresetHandle))
+			{
+				PresetRow->CustomWidget()
+					.NameContent()
+					[
+						PresetHandle->CreatePropertyNameWidget()
+					]
+					.ValueContent()
+					[
+						SNew(SObjectPropertyEntryBox)
+						.PropertyHandle(PresetHandle)
+						.AllowedClass(UAgentSolverPreset::StaticClass())
+						.NewAssetFactories(TArray<UFactory*>{ PresetFactory.Get() })
+						.AllowCreate(true)
+						.AllowClear(true)
+						.DisplayThumbnail(true)
+					];
+			}
 		}
 	};
 }
@@ -197,6 +244,12 @@ FText SAgentSolverControlPanel::GetStatusText() const
 	return Driver->IsTrainingActive()
 		? LOCTEXT("StatusTraining", "Training is RUNNING.")
 		: LOCTEXT("StatusStopped", "Driver found. Training is stopped.");
+}
+
+EVisibility SAgentSolverControlPanel::GetImitationGraphVisibility() const
+{
+	const AMutoRLTrainingDriver* Driver = AgentSolverUI::FindTrainingDriver();
+	return (Driver && Driver->HasReferenceMotion()) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 FText SAgentSolverControlPanel::GetStatsText() const
@@ -309,6 +362,160 @@ FReply SAgentSolverControlPanel::OnLoadFromAssetsClicked()
 	return FReply::Handled();
 }
 
+void SAgentSolverControlPanel::LoadPreset(UAgentSolverPreset* Preset)
+{
+	if (!Preset)
+	{
+		return;
+	}
+	if (ViewportSettings.IsValid())
+	{
+		ViewportSettings->ActivePreset = Preset;
+
+		// EnvironmentLevel here is UAgentSolverViewportSettings::
+		// EnvironmentLevel -- the cosmetic preview-scene level the embedded
+		// viewport copies static geometry from (see that property's own
+		// comment), NOT a request to switch the actual editor's currently
+		// open level. An earlier version of this function did exactly that
+		// via FEditorFileUtils::LoadMap, based on a misreading of what
+		// "environment level" meant here -- LoadMap tears down and rebuilds
+		// the whole world, and calling it synchronously from inside a
+		// tab-spawn/double-click callback was unsafe, which is the likely
+		// cause of the 2026-08-25 "preset doesn't load at tool-open" and
+		// "doesn't switch levels" reports. Removed entirely: restoring the
+		// preview-scene level is enough to make "reopen the project, get my
+		// last environment back" work without ever touching the editor's
+		// actual open level.
+		ViewportSettings->EnvironmentLevel = Preset->EnvironmentLevel;
+	}
+
+	// Everything else applies to whatever driver is in the currently open
+	// level. Network/tuning fields are copied unconditionally
+	// -- an empty slot or a default-scale weight is a perfectly meaningful,
+	// deliberate value there. Rig assets are NOT: SkeletalMesh/MassAsset/
+	// MuscleAsset are structurally REQUIRED for StartTraining() to do
+	// anything at all (it bails out at the very first check if any of the
+	// three is null) -- unconditionally nulling them from an incompletely-
+	// filled preset (e.g. one just created via "+" and not populated yet)
+	// silently broke training for the rest of the PIE session: StartTraining
+	// bailed before ever touching Policy's network assets, so Policy existed
+	// but GetEncoderNetworkAsset() etc. stayed null, and stopping PIE then
+	// crashed inside SaveNetworkToSnapshot calling through that null pointer
+	// (2026-08-25 bug report -- matches EXCEPTION_ACCESS_VIOLATION reading
+	// 0x38, LearningAgentsNeuralNetwork.cpp:49's `this->NeuralNetworkData`
+	// with `this` null). So: only overwrite a Rig slot when the preset
+	// actually has something in it; an empty preset field leaves the
+	// driver's current assignment alone instead of wiping it.
+	AMutoRLTrainingDriver* Driver = AgentSolverUI::FindTrainingDriver();
+	if (!Driver)
+	{
+		return;
+	}
+
+	// See UAgentSolverPreset::ApplyToDriver's comment -- this used to be a
+	// field-by-field copy inline here; extracted so ULearningProgramNode's
+	// per-stage Params can reuse the exact same logic.
+	Preset->ApplyToDriver(Driver);
+}
+
+void SAgentSolverControlPanel::LoadFirstAvailablePreset()
+{
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	TArray<FAssetData> Assets;
+	AssetRegistryModule.Get().GetAssetsByClass(UAgentSolverPreset::StaticClass()->GetClassPathName(), Assets);
+	if (Assets.Num() > 0)
+	{
+		if (UAgentSolverPreset* Preset = Cast<UAgentSolverPreset>(Assets[0].GetAsset()))
+		{
+			LoadPreset(Preset);
+		}
+	}
+}
+
+void SAgentSolverControlPanel::SyncActivePresetFromDriver(const FPropertyChangedEvent& Event)
+{
+	UAgentSolverPreset* Preset = ViewportSettings.IsValid() ? ViewportSettings->ActivePreset : nullptr;
+	if (!Preset)
+	{
+		return;
+	}
+
+	// EnvironmentLevel lives on ViewportSettings, not the driver -- synced
+	// unconditionally here, independent of whether a driver is currently
+	// found, so "reopen the project, get my last environment back" works
+	// even when edited from a context with no driver in the open level.
+	Preset->EnvironmentLevel = ViewportSettings->EnvironmentLevel;
+
+	if (AMutoRLTrainingDriver* Driver = AgentSolverUI::FindTrainingDriver())
+	{
+		Preset->SkeletalMesh = Driver->SkeletalMesh;
+		Preset->MassAsset = Driver->MassAsset;
+		Preset->MuscleAsset = Driver->MuscleAsset;
+		Preset->LoadEncoderNetworkAsset = Driver->LoadEncoderNetworkAsset;
+		Preset->LoadPolicyNetworkAsset = Driver->LoadPolicyNetworkAsset;
+		Preset->LoadDecoderNetworkAsset = Driver->LoadDecoderNetworkAsset;
+		Preset->SaveEncoderNetworkAsset = Driver->SaveEncoderNetworkAsset;
+		Preset->SavePolicyNetworkAsset = Driver->SavePolicyNetworkAsset;
+		Preset->SaveDecoderNetworkAsset = Driver->SaveDecoderNetworkAsset;
+		Preset->MaxTorquePerDOF = Driver->MaxTorquePerDOF;
+		Preset->MinUprightDot = Driver->MinUprightDot;
+		Preset->MinHeightFraction = Driver->MinHeightFraction;
+		Preset->AliveBonus = Driver->AliveBonus;
+		Preset->UprightWeight = Driver->UprightWeight;
+		Preset->BalanceWeight = Driver->BalanceWeight;
+		Preset->TorquePenaltyWeight = Driver->TorquePenaltyWeight;
+		Preset->RewardHeightTarget = Driver->RewardHeightTarget;
+		Preset->RewardHeightMultiplier = Driver->RewardHeightMultiplier;
+		Preset->RewardEnergyConsumptionMultiplier = Driver->RewardEnergyConsumptionMultiplier;
+		Preset->RewardMusclesUseMultiplier = Driver->RewardMusclesUseMultiplier;
+		Preset->GlobalRewardScale = Driver->GlobalRewardScale;
+		Preset->GlobalRewardOffset = Driver->GlobalRewardOffset;
+		Preset->GlobalMuscleStrengthScale = Driver->GlobalMuscleStrengthScale;
+		Preset->MuscleActivationThresholdMultiplier = Driver->MuscleActivationThresholdMultiplier;
+		Preset->Gravity = Driver->Gravity;
+		Preset->bImitationObjective = (Driver->ObjectiveMode == EMutoObjectiveMode::Imitation);
+		Preset->ReferenceMotion = Driver->ReferenceMotion;
+		Preset->ReferencePoseTime = Driver->ReferencePoseTime;
+		Preset->bImitateFullClip = Driver->bImitateFullClip;
+		Preset->ReferenceSampleRate = Driver->ReferenceSampleRate;
+		Preset->bReferenceMotionLoops = Driver->bReferenceMotionLoops;
+		Preset->bResetToReferencePose = Driver->bResetToReferencePose;
+		Preset->EndEffectorBoneNames = Driver->EndEffectorBoneNames;
+		Preset->ImitationPoseWeight = Driver->ImitationPoseWeight;
+		Preset->ImitationVelocityWeight = Driver->ImitationVelocityWeight;
+		Preset->ImitationEndEffectorWeight = Driver->ImitationEndEffectorWeight;
+		Preset->ImitationRootWeight = Driver->ImitationRootWeight;
+		Preset->ImitationPoseErrorScale = Driver->ImitationPoseErrorScale;
+		Preset->ImitationVelocityErrorScale = Driver->ImitationVelocityErrorScale;
+		Preset->ImitationEndEffectorErrorScale = Driver->ImitationEndEffectorErrorScale;
+		Preset->ImitationRootErrorScale = Driver->ImitationRootErrorScale;
+		Preset->ImitationMaxPoseErrorRad = Driver->ImitationMaxPoseErrorRad;
+		Preset->bImitationTerminateOnUprightAndHeight = Driver->bImitationTerminateOnUprightAndHeight;
+	}
+	Preset->MarkPackageDirty();
+}
+
+void SAgentSolverControlPanel::OnActivePresetPicked(const FPropertyChangedEvent& Event)
+{
+	if (!ViewportSettings.IsValid())
+	{
+		return;
+	}
+	if (Event.GetPropertyName() == GET_MEMBER_NAME_CHECKED(UAgentSolverViewportSettings, ActivePreset))
+	{
+		if (UAgentSolverPreset* Preset = ViewportSettings->ActivePreset)
+		{
+			LoadPreset(Preset);
+		}
+		return;
+	}
+	// Any other Viewport tab edit -- right now just EnvironmentLevel -- gets
+	// written back into the active preset, same "keep the preset in sync"
+	// rule SyncActivePresetFromDriver applies to the Agent/Physics/Reward
+	// Settings tabs.
+	SyncActivePresetFromDriver(Event);
+}
+
 FReply SAgentSolverControlPanel::OnSelectParameterTab(int32 TabIndex)
 {
 	ActiveParameterTabIndex = TabIndex;
@@ -377,14 +584,45 @@ TSharedRef<IDetailsView> SAgentSolverControlPanel::CreateFilteredDetailsView(con
 	View->SetIsPropertyVisibleDelegate(FIsPropertyVisible::CreateLambda(
 		[AllowedCategoryPrefixes](const FPropertyAndParent& PropertyAndParent)
 		{
-			const FString* Category = PropertyAndParent.Property.FindMetaData(TEXT("Category"));
-			if (!Category)
+			auto MatchesAllowedPrefix = [&AllowedCategoryPrefixes](const FProperty& Property)
 			{
+				const FString* Category = Property.FindMetaData(TEXT("Category"));
+				if (!Category)
+				{
+					return false;
+				}
+				for (const FString& Prefix : AllowedCategoryPrefixes)
+				{
+					if (Category->StartsWith(Prefix))
+					{
+						return true;
+					}
+				}
 				return false;
-			}
-			for (const FString& Prefix : AllowedCategoryPrefixes)
+			};
+
+			if (MatchesAllowedPrefix(PropertyAndParent.Property))
 			{
-				if (Category->StartsWith(Prefix))
+				return true;
+			}
+
+			// Fall back to the parent chain -- a struct-VALUED UPROPERTY's own
+			// Category (e.g. AMutoRLTrainingDriver::TrainingSettings' "Muto
+			// RL|Training") only tags the struct property itself. Every LEAF
+			// field inside FLearningAgentsPPOTrainingSettings/
+			// FLearningAgentsPPOTrainerSettings/FLearningAgentsPolicySettings/
+			// FLearningAgentsCriticSettings carries Epic's OWN "LearningAgents"
+			// Category tag, which never matched any prefix here on its own --
+			// so EVERY field of those 4 structs (EpsilonClip, GaeLambda,
+			// bAdvantageNormalization, MinimumAdvantage/MaximumAdvantage,
+			// bUseGradNormMaxClipping, GradNormMax, learning rates, batch
+			// sizes, IterationsPerGather, etc.) was silently invisible in
+			// every tab despite TrainingSettings itself living in "Muto
+			// RL|Training" -- confirmed 2026-08-25 chasing why
+			// bUseGradNormMaxClipping wasn't reachable anywhere in the panel.
+			for (const FProperty* Parent : PropertyAndParent.ParentProperties)
+			{
+				if (Parent && MatchesAllowedPrefix(*Parent))
 				{
 					return true;
 				}
@@ -392,35 +630,18 @@ TSharedRef<IDetailsView> SAgentSolverControlPanel::CreateFilteredDetailsView(con
 			return false;
 		}));
 
+	// Any edit finished on this view (Rig/Networks/Reward tuning, depending
+	// on which of the 3 filtered views this is) writes the driver's current
+	// preset-tracked fields back into the active preset, if any -- see
+	// SyncActivePresetFromDriver's own comment.
+	View->OnFinishedChangingProperties().AddSP(this, &SAgentSolverControlPanel::SyncActivePresetFromDriver);
+
 	return View;
 }
 
 void SAgentSolverControlPanel::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
-
-	// See LastKnownSourceActor's comment -- SetObject is skipped unless the
-	// resolved actor instance actually changed (e.g. across PIE start/stop or
-	// a viewport-source switch), not re-run every frame. Agent/Physics tabs
-	// follow the VIEWPORT'S current source (Ragdoll/Visualizer), not
-	// necessarily the plain training driver -- FindTrainingDriver() below is
-	// used separately, only for the Play/Stop/stats/graphs, which are
-	// specifically about the plain driver's own training loop.
-	const EAgentSolverViewportSource Source = ViewportSettings.IsValid() ? ViewportSettings->ViewportSource : EAgentSolverViewportSource::Ragdoll;
-	AMutoRLTrainingDriver* SourceActor = AgentSolverUI::FindViewportSourceActor(Source);
-	if (SourceActor != LastKnownSourceActor.Get())
-	{
-		LastKnownSourceActor = SourceActor;
-
-		if (AgentParametersView.IsValid())
-		{
-			AgentParametersView->SetObject(SourceActor);
-		}
-		if (PhysicsParametersView.IsValid())
-		{
-			PhysicsParametersView->SetObject(SourceActor);
-		}
-	}
 
 	// IsPIERunning() specifically, not just Driver -- FindTrainingDriver()
 	// deliberately falls back to the plain editor-world actor when PIE isn't
@@ -430,13 +651,51 @@ void SAgentSolverControlPanel::Tick(const FGeometry& AllottedGeometry, const dou
 	// samples that fill the graphs' ring buffers before real data ever shows up.
 	AMutoRLTrainingDriver* Driver = AgentSolverUI::FindTrainingDriver();
 
-	// RewardSettingsView tracks the SAME actor Driver resolves to (see this
-	// class's header comment for why it's FindTrainingDriver() and not the
-	// viewport source) -- separate change-tracking from LastKnownSourceActor
-	// above since the two views can legitimately point at different actors.
+	// Physics tab (Simulation/Contact/Diagnostics) normally follows the
+	// VIEWPORT'S current preview source (Ragdoll/Visualizer), so it stays
+	// useful for previewing/tuning physics against a cheap single-env
+	// preview actor before committing to a full training run -- but while
+	// training is actually running it switches to the real training driver
+	// instead, so e.g. Gravity reads/writes the SAME actor training does
+	// (2026-08-25 bug report -- editing it here used to silently edit the
+	// PREVIEW actor's own copy while training read a completely different
+	// actor's Gravity, with no visible link between the two).
+	const bool bTrainingActive = Driver && Driver->IsTrainingActive();
+	const EAgentSolverViewportSource Source = ViewportSettings.IsValid() ? ViewportSettings->ViewportSource : EAgentSolverViewportSource::Ragdoll;
+	AMutoRLTrainingDriver* PhysicsSourceActor = bTrainingActive ? Driver : AgentSolverUI::FindViewportSourceActor(Source);
+	if (PhysicsSourceActor != LastKnownSourceActor.Get())
+	{
+		LastKnownSourceActor = PhysicsSourceActor;
+		if (PhysicsParametersView.IsValid())
+		{
+			PhysicsParametersView->SetObject(PhysicsSourceActor);
+		}
+	}
+
+	// Agent tab (Rig/Reward/Reset/Training/Learning) and Reward Settings
+	// ALWAYS track the real training driver, unconditionally -- unlike the
+	// Physics tab above, there is no legitimate reason for these to ever
+	// follow the viewport source. AMutoRLVisualizerActor/
+	// AMutoRagdollVisualizerActor INHERIT from AMutoRLTrainingDriver (see
+	// their class declarations), so they carry their OWN separate copies of
+	// EVERY one of these fields -- SkeletalMesh, MassAsset, MuscleAsset,
+	// AliveBonus, the 6 Load*/Save*NetworkAsset slots, all of it. Following
+	// the viewport source here (as this tab used to, before 2026-08-25) meant
+	// that before training ever started, inspecting or editing the Agent tab
+	// silently showed/edited the PREVIEW actor's copies instead of the real
+	// driver's -- worse than the Gravity trap, since it could make the
+	// driver's OWN rig assets look configured while actually being unset,
+	// and StartTraining() would then refuse to run with no visible reason
+	// why (confirmed 2026-08-25: SkeletalMesh/MassAsset/MuscleAsset appeared
+	// assigned in this tab while the real driver had none set, and PIE
+	// crashed on stop trying to save a Policy that never finished setting up).
 	if (Driver != LastKnownDriverForReward.Get())
 	{
 		LastKnownDriverForReward = Driver;
+		if (AgentParametersView.IsValid())
+		{
+			AgentParametersView->SetObject(Driver);
+		}
 		if (RewardSettingsView.IsValid())
 		{
 			RewardSettingsView->SetObject(Driver);
@@ -474,6 +733,17 @@ void SAgentSolverControlPanel::Tick(const FGeometry& AllottedGeometry, const dou
 		{
 			MusclesUseMalusGraph->AddSample(Driver->GetLastMusclesUseMalus());
 		}
+		// Only sampled while a reference is actually in play -- otherwise these
+		// four would draw a flat line at whatever their EMAs were last left at,
+		// which reads as "imitation is failing" when the run simply isn't
+		// imitating anything.
+		if (Driver->HasReferenceMotion())
+		{
+			if (PoseRewardGraph.IsValid()) { PoseRewardGraph->AddSample(Driver->GetLastPoseReward()); }
+			if (VelocityRewardGraph.IsValid()) { VelocityRewardGraph->AddSample(Driver->GetLastVelocityReward()); }
+			if (EndEffectorRewardGraph.IsValid()) { EndEffectorRewardGraph->AddSample(Driver->GetLastEndEffectorReward()); }
+			if (RootRewardGraph.IsValid()) { RootRewardGraph->AddSample(Driver->GetLastRootReward()); }
+		}
 
 		// Diagnostic for "the graphs show a flat line" -- confirms samples are
 		// actually being taken (proves Tick() is firing and Driver is found,
@@ -504,6 +774,12 @@ void SAgentSolverControlPanel::Construct(const FArguments& InArgs)
 	// render as a native combo box and asset picker respectively, for free,
 	// same as EnvIndexToVisualize/bShowFloor already did. No bespoke rows on
 	// top of this view -- see AgentParameterCategoryPrefixes' comment for why.
+	// Except ActivePreset (added 2026-08-25): that gets the SAME "create new
+	// asset" (+) button as the 6 Load*/Save*NetworkAsset rows, via the same
+	// FAgentSolverCategoryFilterCustomization registered against
+	// UAgentSolverViewportSettings here -- its HideCategory calls are all
+	// no-ops for this class (it has none of those categories), so this stays
+	// otherwise unfiltered exactly as before.
 	{
 		FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 		FDetailsViewArgs DetailsViewArgs;
@@ -512,7 +788,12 @@ void SAgentSolverControlPanel::Construct(const FArguments& InArgs)
 		DetailsViewArgs.bShowObjectLabel = false;
 		DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 		ViewportParametersView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
+		ViewportParametersView->RegisterInstancedCustomPropertyLayout(UAgentSolverViewportSettings::StaticClass(),
+			FOnGetDetailCustomizationInstance::CreateStatic(&FAgentSolverCategoryFilterCustomization::MakeInstance));
 		ViewportParametersView->SetObject(ViewportSettings.Get());
+
+		// Picking a different preset here applies it -- see OnActivePresetPicked.
+		ViewportParametersView->OnFinishedChangingProperties().AddSP(this, &SAgentSolverControlPanel::OnActivePresetPicked);
 	}
 
 	AgentParametersView = CreateFilteredDetailsView(AgentParameterCategoryPrefixes);
@@ -528,6 +809,10 @@ void SAgentSolverControlPanel::Construct(const FArguments& InArgs)
 	SAssignNew(TorsoHeightBonusGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.8f, 0.7f, 0.2f)).MaxSamples(150);
 	SAssignNew(EnergyConsumptionMalusGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.9f, 0.4f, 0.2f)).MaxSamples(150);
 	SAssignNew(MusclesUseMalusGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.8f, 0.3f, 0.6f)).MaxSamples(150);
+	SAssignNew(PoseRewardGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.3f, 0.8f, 0.9f)).MaxSamples(150);
+	SAssignNew(VelocityRewardGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.4f, 0.6f, 0.9f)).MaxSamples(150);
+	SAssignNew(EndEffectorRewardGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.5f, 0.9f, 0.5f)).MaxSamples(150);
+	SAssignNew(RootRewardGraph, SAgentSolverLineGraph).LineColor(FLinearColor(0.7f, 0.7f, 0.9f)).MaxSamples(150);
 
 	const FMargin ButtonPadding(2.0f, 4.0f);
 	const FMargin IconButtonPadding(4.0f);
@@ -665,6 +950,58 @@ void SAgentSolverControlPanel::Construct(const FArguments& InArgs)
 						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 0.0f)
 						[
 							MusclesUseMalusGraph.ToSharedRef()
+						]
+						// Imitation terms. Visible only while a reference is
+						// baked -- on a standing run they would draw four
+						// permanently-empty graphs, which is noise, not
+						// information.
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 12.0f, 6.0f, 2.0f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("PoseRewardGraphTitle", "Imitation: pose (EMA)")).ColorAndOpacity(SectionHeaderColor)
+								.Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 0.0f)
+						[
+							SNew(SBox).Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+							[
+								PoseRewardGraph.ToSharedRef()
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 12.0f, 6.0f, 2.0f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("VelocityRewardGraphTitle", "Imitation: joint velocity (EMA)")).ColorAndOpacity(SectionHeaderColor)
+								.Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 0.0f)
+						[
+							SNew(SBox).Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+							[
+								VelocityRewardGraph.ToSharedRef()
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 12.0f, 6.0f, 2.0f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("EndEffectorRewardGraphTitle", "Imitation: end effectors (EMA)")).ColorAndOpacity(SectionHeaderColor)
+								.Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 0.0f)
+						[
+							SNew(SBox).Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+							[
+								EndEffectorRewardGraph.ToSharedRef()
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 12.0f, 6.0f, 2.0f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("RootRewardGraphTitle", "Imitation: root (EMA)")).ColorAndOpacity(SectionHeaderColor)
+								.Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(6.0f, 0.0f)
+						[
+							SNew(SBox).Visibility(this, &SAgentSolverControlPanel::GetImitationGraphVisibility)
+							[
+								RootRewardGraph.ToSharedRef()
+							]
 						]
 					]
 				]

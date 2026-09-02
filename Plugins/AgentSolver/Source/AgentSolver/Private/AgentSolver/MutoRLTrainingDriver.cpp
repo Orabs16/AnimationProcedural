@@ -1,5 +1,7 @@
 #include "AgentSolver/MutoRLTrainingDriver.h"
 
+#include "AgentSolver/MutoRLVisualizer.h"
+#include "AgentSolver/LearningProgram.h"
 #include "LearningAgentsManager.h"
 #include "LearningAgentsObservations.h"
 #include "LearningAgentsActions.h"
@@ -13,8 +15,18 @@
 
 #if WITH_EDITOR
 #include "PhysicsSolver/MutoTopology.h"
+#include "AgentSolver/ImitationBake.h"
 #include "Engine/SkeletalMesh.h"
+#include "Animation/AnimSequence.h"
+#include "FileHelpers.h"
 #endif
+
+// EMutoObjectiveMode exists only so the Details panel shows a dropdown; the
+// value is cast straight across to the plain enum the header-only environment
+// code uses. Keep the two in lockstep -- a silent renumber here would swap the
+// objective without any compile error to catch it.
+static_assert((uint8)EMutoObjectiveMode::Standing == (uint8)CreatureRLEnvironment::EObjectiveMode::Standing, "EMutoObjectiveMode/EObjectiveMode out of sync");
+static_assert((uint8)EMutoObjectiveMode::Imitation == (uint8)CreatureRLEnvironment::EObjectiveMode::Imitation, "EMutoObjectiveMode/EObjectiveMode out of sync");
 
 // ================================ UMutoRLInteractor ================================
 
@@ -22,7 +34,11 @@ void UMutoRLInteractor::SpecifyAgentObservation_Implementation(FLearningAgentsOb
 {
 	const AMutoRLTrainingDriver* Driver = GetTypedOuter<AMutoRLTrainingDriver>();
 	check(Driver);
-	const int32 ObservationSize = CreatureRLEnvironment::GetObservationSize(Driver->Batch.GetTopology(), Driver->ContactPoints.Num());
+	// Must agree with ComputeObservations' actual output length, phase
+	// component included -- Learning Agents asserts on a length mismatch
+	// rather than tolerating one.
+	const int32 ObservationSize = CreatureRLEnvironment::GetObservationSize(
+		Driver->Batch.GetTopology(), Driver->ContactPoints.Num(), Driver->Config.bAppendPhaseObservation);
 	OutObservationSchemaElement = ULearningAgentsObservations::SpecifyContinuousObservation(InObservationSchema, ObservationSize);
 }
 
@@ -33,7 +49,8 @@ void UMutoRLInteractor::GatherAgentObservation_Implementation(FLearningAgentsObs
 	const int32 EnvIndex = Driver->GetEnvIndexForAgent(AgentId);
 
 	TArray<float> Observation;
-	CreatureRLEnvironment::ComputeObservations(Driver->Batch, EnvIndex, Driver->Config, Driver->ContactPoints, Driver->ContactStates, Driver->Batch.GetNumEnvs(), Observation);
+	CreatureRLEnvironment::ComputeObservations(Driver->Batch, EnvIndex, Driver->Config, Driver->ContactPoints, Driver->ContactStates, Driver->Batch.GetNumEnvs(), Observation,
+		Driver->GetEnvPhase(EnvIndex));
 	OutObservationObjectElement = ULearningAgentsObservations::MakeContinuousObservation(InObservationObject, Observation);
 }
 
@@ -52,6 +69,23 @@ void UMutoRLInteractor::PerformAgentAction_Implementation(const ULearningAgentsA
 
 	TArray<float> Actions;
 	ULearningAgentsActions::GetContinuousAction(Actions, InActionObject, InActionObjectElement);
+
+	// Captured RAW here (pre-clamp, pre-activation-threshold-gate) for the live
+	// AI debug window (see AMutoRLVisualizerActor::LastNormalizedActions) --
+	// reading it back out of Batch.JointTorque after ApplyActions used to work
+	// but stopped once ApplyActions started zeroing sub-threshold commands
+	// (see FMassMuscleDataMuscle::MuscleActivationThreshold): a muscle that
+	// legitimately didn't activate is then indistinguishable, from JointTorque
+	// alone, from a policy that commanded exactly 0 -- capturing the source
+	// value here is the only way to keep showing "what the policy actually
+	// output" rather than "what got physically applied". Guarded by Cast since
+	// this base-class Interactor also runs for ordinary (non-visualizer)
+	// training, which has no debug window reading this.
+	if (AMutoRLVisualizerActor* VisualizerDriver = Cast<AMutoRLVisualizerActor>(Driver))
+	{
+		VisualizerDriver->LastNormalizedActions = Actions;
+	}
+
 	CreatureRLEnvironment::ApplyActions(Driver->Batch, EnvIndex, Actions, Driver->Config);
 }
 
@@ -62,11 +96,49 @@ void UMutoRLTrainingEnvironment::GatherAgentReward_Implementation(float& OutRewa
 	AMutoRLTrainingDriver* Driver = GetTypedOuter<AMutoRLTrainingDriver>();
 	check(Driver);
 	const int32 EnvIndex = Driver->GetEnvIndexForAgent(AgentId);
+
+	// Config's tuning-knob fields were only ever copied from the driver's own
+	// UPROPERTYs once, in StartTraining() -- editing them on a live Details
+	// panel while training runs silently did nothing, since nothing ever
+	// wrote the new value back into Config afterward (confirmed: it took
+	// stopping and restarting training, which re-runs StartTraining()'s
+	// one-time copy, for a live edit to actually take effect). Refreshed
+	// here every call instead -- this runs once per agent per step, so up to
+	// NumEnvs redundant scalar copies per step, which is immaterial next to
+	// this function's own ComputeReward cost. GroundZ/TargetTorsoHeight/
+	// LocalUpAxis are deliberately NOT included: those are derived once from
+	// the topology's rest pose at StartTraining time, not raw tuning knobs.
+	Driver->Config.MaxTorquePerDOF = Driver->MaxTorquePerDOF;
+	Driver->Config.MuscleActivationThresholdMultiplier = Driver->MuscleActivationThresholdMultiplier;
+	Driver->Config.MinUprightDot = Driver->MinUprightDot;
+	Driver->Config.MinHeightFraction = Driver->MinHeightFraction;
+	Driver->Config.AliveBonus = Driver->AliveBonus;
+	Driver->Config.UprightWeight = Driver->UprightWeight;
+	Driver->Config.BalanceWeight = Driver->BalanceWeight;
+	Driver->Config.TorquePenaltyWeight = Driver->TorquePenaltyWeight;
+	Driver->Config.RewardHeightTarget = Driver->RewardHeightTarget;
+	Driver->Config.RewardHeightMultiplier = Driver->RewardHeightMultiplier;
+	Driver->Config.RewardEnergyConsumptionMultiplier = Driver->RewardEnergyConsumptionMultiplier;
+	Driver->Config.RewardMusclesUseMultiplier = Driver->RewardMusclesUseMultiplier;
+	Driver->Config.GlobalRewardScale = Driver->GlobalRewardScale;
+	Driver->Config.GlobalRewardOffset = Driver->GlobalRewardOffset;
+	// The imitation weights/falloffs are live-tunable for the same reason
+	// every knob above is. ObjectiveMode and bAppendPhaseObservation are NOT
+	// refreshed here: both change the network's input shape or require a
+	// re-bake, so they are read once by StartTraining and honoured for the
+	// life of the run.
+	Driver->ApplyLiveImitationTuning();
+
 	float TorsoHeightBonus = 0.0f;
 	float EnergyConsumptionMalus = 0.0f;
 	float MusclesUseMalus = 0.0f;
+	CreatureRLEnvironment::FImitationBreakdown ImitationBreakdown;
+	CreatureRLEnvironment::FImitationTarget ImitationTarget;
+	CreatureImitation::FReferenceFrame ReferenceFrame;
+	Driver->BuildImitationTarget(EnvIndex, ImitationTarget, ReferenceFrame);
+
 	OutReward = CreatureRLEnvironment::ComputeReward(Driver->Batch, EnvIndex, Driver->Config, Driver->ContactPoints, Driver->ContactStates, Driver->Batch.GetNumEnvs(),
-		&TorsoHeightBonus, &EnergyConsumptionMalus, &MusclesUseMalus);
+		&TorsoHeightBonus, &EnergyConsumptionMalus, &MusclesUseMalus, &ImitationTarget, &ImitationBreakdown);
 
 	// See AverageReward's comment -- slow-moving EMA (alpha small on purpose:
 	// this runs once per agent per step, i.e. up to NumEnvs samples per
@@ -81,6 +153,17 @@ void UMutoRLTrainingEnvironment::GatherAgentReward_Implementation(float& OutRewa
 	Driver->LastTorsoHeightBonus.store(FMath::Lerp(Driver->LastTorsoHeightBonus.load(std::memory_order_relaxed), TorsoHeightBonus, RewardEmaAlpha), std::memory_order_relaxed);
 	Driver->LastEnergyConsumptionMalus.store(FMath::Lerp(Driver->LastEnergyConsumptionMalus.load(std::memory_order_relaxed), EnergyConsumptionMalus, RewardEmaAlpha), std::memory_order_relaxed);
 	Driver->LastMusclesUseMalus.store(FMath::Lerp(Driver->LastMusclesUseMalus.load(std::memory_order_relaxed), MusclesUseMalus, RewardEmaAlpha), std::memory_order_relaxed);
+
+	// Only meaningful when a reference was actually in play -- otherwise these
+	// would decay toward zero and read as "imitation is failing" when the run
+	// simply is not imitating anything.
+	if (ImitationTarget.Frame)
+	{
+		Driver->LastPoseReward.store(FMath::Lerp(Driver->LastPoseReward.load(std::memory_order_relaxed), ImitationBreakdown.PoseReward, RewardEmaAlpha), std::memory_order_relaxed);
+		Driver->LastVelocityReward.store(FMath::Lerp(Driver->LastVelocityReward.load(std::memory_order_relaxed), ImitationBreakdown.VelocityReward, RewardEmaAlpha), std::memory_order_relaxed);
+		Driver->LastEndEffectorReward.store(FMath::Lerp(Driver->LastEndEffectorReward.load(std::memory_order_relaxed), ImitationBreakdown.EndEffectorReward, RewardEmaAlpha), std::memory_order_relaxed);
+		Driver->LastRootReward.store(FMath::Lerp(Driver->LastRootReward.load(std::memory_order_relaxed), ImitationBreakdown.RootReward, RewardEmaAlpha), std::memory_order_relaxed);
+	}
 }
 
 void UMutoRLTrainingEnvironment::GatherAgentCompletion_Implementation(ELearningAgentsCompletion& OutCompletion, const int32 AgentId)
@@ -94,8 +177,17 @@ void UMutoRLTrainingEnvironment::GatherAgentCompletion_Implementation(ELearningA
 	// "ran out of runway" truncation case here, only max-episode-length,
 	// which the PPOTrainer/TrainingEnvironment already handle internally
 	// via MaxEpisodeStepNum).
+	// The imitation target is rebuilt here rather than shared with
+	// GatherAgentReward above: Learning Agents calls the two independently
+	// (and reward first), so caching one on the driver would be a cross-call
+	// assumption about engine ordering that nothing enforces. Sampling a
+	// baked frame is a handful of lerps.
+	CreatureRLEnvironment::FImitationTarget ImitationTarget;
+	CreatureImitation::FReferenceFrame ReferenceFrame;
+	Driver->BuildImitationTarget(EnvIndex, ImitationTarget, ReferenceFrame);
+
 	OutCompletion = CreatureRLEnvironment::IsTerminated(Driver->Batch, EnvIndex, Driver->Config,
-		&Driver->ContactStates, Driver->ContactPoints.Num(), Driver->Batch.GetNumEnvs())
+		&Driver->ContactStates, Driver->ContactPoints.Num(), Driver->Batch.GetNumEnvs(), &ImitationTarget)
 		? ELearningAgentsCompletion::Termination
 		: ELearningAgentsCompletion::Running;
 
@@ -127,7 +219,12 @@ void UMutoRLTrainingEnvironment::GatherAgentCompletion_Implementation(ELearningA
 	//     like one doubled stream.
 	if (OutCompletion != ELearningAgentsCompletion::Running)
 	{
-		UE_LOG(LogTemp, Log, TEXT("MutoRL: AgentId=%d EnvIndex=%d completion=Termination (NumEnvs=%d, actor=%s, thread=%u)"),
+		// Verbose, not Log -- during a real training run this fires often
+		// enough (every terminated env, every episode) to flood the log
+		// alongside the other [AS-TRACE] heartbeats. Still here, re-enable
+		// with `Log LogTemp Verbose` if the doubled-termination investigation
+		// above needs to resume.
+		UE_LOG(LogTemp, Verbose, TEXT("MutoRL: AgentId=%d EnvIndex=%d completion=Termination (NumEnvs=%d, actor=%s, thread=%u)"),
 			AgentId, EnvIndex, Driver->Batch.GetNumEnvs(), *Driver->GetName(), FPlatformTLS::GetCurrentThreadId());
 	}
 }
@@ -145,6 +242,8 @@ void UMutoRLTrainingEnvironment::ResetAgentEpisode_Implementation(const int32 Ag
 	// comment). Per-env, so other envs sharing this same array are
 	// unaffected.
 	CreatureRLEnvironment::ClearContactStatesForEnv(Driver->ContactStates, Driver->ContactPoints.Num(), EnvIndex, Driver->Batch.GetNumEnvs());
+
+	Driver->ResetImitationEpisode(EnvIndex);
 
 	Driver->EpisodeCount.fetch_add(1, std::memory_order_relaxed);
 }
@@ -227,12 +326,31 @@ AMutoRLTrainingDriver::AMutoRLTrainingDriver()
 	// the entropy formula), so it pushes back on extreme log_std
 	// independently of whatever the entropy term is doing. Its plugin
 	// default (0.001) was never touched by this project until now; raised
-	// 10x here as the next, more targeted line of defense. If NaN weights
-	// still recur after this, the next lever to reach for is
-	// LearningRatePolicy (currently plugin default 0.0001) — a smaller
-	// policy step reduces how far log_std can move in a single bad update,
-	// which is complementary to (not a replacement for) this.
+	// 10x here as the next, more targeted line of defense.
 	TrainingSettings.ActionRegularizationWeight = 0.01f;
+
+	// Confirmed the crash recurred a FIFTH time (2026-08-30) with all three
+	// mitigations above active -- same exact diagnostic signature as every
+	// prior round (LearningNeuralNetwork.cpp:350's Array::Check(Output),
+	// AFTER the network runs, never line 317's Array::Check(Input) before
+	// it), so this is still the same NaN-WEIGHTS failure mode, not a fresh
+	// corrupted-observation one. This is the next lever flagged when
+	// ActionRegularizationWeight was raised above: LearningRatePolicy kept
+	// its plugin default (0.0001, already the low end of the plugin's own
+	// documented 0.001-0.0001 "typical" range) until now. Halved rather than
+	// slashed further, matching this project's own pattern of moderate,
+	// one-step-at-a-time escalation on this specific setting so its actual
+	// effect on the recurrence rate stays legible instead of being confounded
+	// with a large jump. A smaller policy step reduces how far one PPO
+	// update can move log_std, which is complementary to (not a replacement
+	// for) grad-norm clipping/entropy/action-regularization above -- none of
+	// which bound the SIZE of the step itself, only how the gradient inside
+	// it behaves. If NaN weights still recur after this, the next lever is
+	// LearningRateCritic (currently plugin default 0.001, 10x the policy
+	// rate per the plugin's own guidance) -- an unstable critic can itself
+	// be the source of the large policy-gradient spikes clipping only
+	// partially catches.
+	TrainingSettings.LearningRatePolicy = 0.00005f;
 }
 
 float AMutoRLTrainingDriver::ComputeDefaultStandingHeight(const FCreatureTopology& Topo, const TArray<CreatureGroundContact::FContactPointDef>& InContactPoints, const FQuat& StandingTorsoRotIn)
@@ -353,6 +471,133 @@ void AMutoRLTrainingDriver::BeginPlay()
 	}
 }
 
+// ---------------------------- Imitation plumbing ----------------------------
+//
+// Deliberately NOT WITH_EDITOR-gated, unlike the bake: these run inside the
+// per-step reward/completion/reset callbacks and only touch CreatureImitation.h,
+// which has no asset dependency. Only producing the ReferenceMotionBaked they
+// consume needs the editor.
+
+void AMutoRLTrainingDriver::ApplyLiveImitationTuning()
+{
+	Config.Imitation.PoseWeight = ImitationPoseWeight;
+	Config.Imitation.VelocityWeight = ImitationVelocityWeight;
+	Config.Imitation.EndEffectorWeight = ImitationEndEffectorWeight;
+	Config.Imitation.RootWeight = ImitationRootWeight;
+	Config.Imitation.PoseErrorScale = ImitationPoseErrorScale;
+	Config.Imitation.VelocityErrorScale = ImitationVelocityErrorScale;
+	Config.Imitation.EndEffectorErrorScale = ImitationEndEffectorErrorScale;
+	Config.Imitation.RootErrorScale = ImitationRootErrorScale;
+	Config.Imitation.MaxPoseErrorRad = ImitationMaxPoseErrorRad;
+	Config.Imitation.bTerminateOnUprightAndHeight = bImitationTerminateOnUprightAndHeight;
+}
+
+float AMutoRLTrainingDriver::GetEnvPhase(int32 EnvIndex) const
+{
+	if (!ReferenceMotionBaked.IsValid() || ReferenceMotionBaked.IsSingleFrame() || !EnvEpisodeTime.IsValidIndex(EnvIndex))
+	{
+		return 0.0f;
+	}
+	// The env's own offset (drawn at reset) plus how long its episode has run.
+	// Two envs resetting at the same instant therefore sit at different points
+	// in the clip -- which is the entire point of reference state
+	// initialization.
+	return ReferenceMotionBaked.TimeToPhase(EnvPhaseOffset[EnvIndex] + EnvEpisodeTime[EnvIndex]);
+}
+
+bool AMutoRLTrainingDriver::BuildImitationTarget(int32 EnvIndex, CreatureRLEnvironment::FImitationTarget& OutTarget, CreatureImitation::FReferenceFrame& OutFrameStorage) const
+{
+	OutTarget = CreatureRLEnvironment::FImitationTarget();
+	OutTarget.RestTorsoHeight = RestTorsoHeight;
+
+	if (Config.ObjectiveMode != CreatureRLEnvironment::EObjectiveMode::Imitation || !ReferenceMotionBaked.IsValid())
+	{
+		return false;
+	}
+
+	if (ReferenceMotionBaked.IsSingleFrame())
+	{
+		// Point straight at the baked frame -- no sampling, no copy. This is
+		// the phase-1 path and it runs once per agent per step.
+		OutTarget.Frame = &ReferenceMotionBaked.Frames[0];
+	}
+	else
+	{
+		ReferenceMotionBaked.SampleByPhase(GetEnvPhase(EnvIndex), Batch.GetTopology(), OutFrameStorage);
+		OutTarget.Frame = &OutFrameStorage;
+	}
+
+	OutTarget.EndEffectorBodies = &ReferenceMotionBaked.EndEffectorBodies;
+	return true;
+}
+
+void AMutoRLTrainingDriver::ResetImitationEpisode(int32 EnvIndex)
+{
+	if (Config.ObjectiveMode != CreatureRLEnvironment::EObjectiveMode::Imitation || !ReferenceMotionBaked.IsValid())
+	{
+		return;
+	}
+	if (!EnvEpisodeTime.IsValidIndex(EnvIndex) || !EnvPhaseOffset.IsValidIndex(EnvIndex))
+	{
+		return;
+	}
+
+	EnvEpisodeTime[EnvIndex] = 0.0f;
+	// Reference state initialization: a random starting phase for a clip, a
+	// fixed zero for a single pose. Drawn from the same ResetStream as the
+	// pose noise above it so reseeding still reproduces a whole run exactly.
+	EnvPhaseOffset[EnvIndex] = ReferenceMotionBaked.IsSingleFrame()
+		? 0.0f
+		: ResetStream.FRandRange(0.0f, FMath::Max(ReferenceMotionBaked.Duration, 0.0f));
+
+	if (!bResetToReferencePose)
+	{
+		return;
+	}
+
+	CreatureImitation::FReferenceFrame SampledFrame;
+	const CreatureImitation::FReferenceFrame* Frame = &ReferenceMotionBaked.Frames[0];
+	if (!ReferenceMotionBaked.IsSingleFrame())
+	{
+		ReferenceMotionBaked.SampleByPhase(GetEnvPhase(EnvIndex), Batch.GetTopology(), SampledFrame);
+		Frame = &SampledFrame;
+	}
+
+	// Overwrites the rest pose ResetEnv just wrote. StandingTorsoPos supplies
+	// the world placement (the frame's own RootPos is in the source's
+	// component space and is not a world position); the frame contributes its
+	// rest-relative height on top.
+	// PRESERVE the reset noise ResetEnv just applied, rather than overwriting
+	// the root outright with StandingTorsoPos/Rot. Without this, imitation
+	// mode would silently discard PosNoiseStdDev/AngleNoiseRad entirely and
+	// every episode would start from a bit-identical pose (modulo phase) --
+	// which is exactly the setup a policy can overfit to, and it would look
+	// like the noise settings simply had no effect.
+	//
+	// The noisy root pose is read back out of the batch and decomposed into
+	// the deliberate part (StandingTorsoRot, which the reference frame
+	// replaces) and the random part (which is kept and re-applied on top).
+	const FVector NoisyPos = Batch.GetBodyPos(0, EnvIndex);
+	const FQuat NoiseDelta = (Batch.GetBodyRot(0, EnvIndex) * StandingTorsoRot.Inverse()).GetNormalized();
+
+	// Refreshes this env's body world transforms itself (single-env FK, not the
+	// solver's whole-batch RecomputeKinematics -- see RecomputeEnvKinematics).
+	CreatureImitation::ApplyReferenceFrameToEnv(Batch, EnvIndex, *Frame, NoisyPos,
+		(NoiseDelta * Frame->RootRot).GetNormalized());
+}
+
+void AMutoRLTrainingDriver::AdvanceImitationClock(float DeltaSeconds)
+{
+	if (Config.ObjectiveMode != CreatureRLEnvironment::EObjectiveMode::Imitation || !ReferenceMotionBaked.IsValid())
+	{
+		return;
+	}
+	for (float& Time : EnvEpisodeTime)
+	{
+		Time += DeltaSeconds;
+	}
+}
+
 void AMutoRLTrainingDriver::StartTraining()
 {
 #if WITH_EDITOR
@@ -367,6 +612,16 @@ void AMutoRLTrainingDriver::StartTraining()
 		return;
 	}
 	bStartTrainingCalled = true;
+
+	// Applied FIRST, before the Rig-asset check right below -- a Learning
+	// Program's entry node can supply SkeletalMesh/MassAsset/MuscleAsset
+	// itself (same "only overwrite non-null slots" rule as any other preset,
+	// see UAgentSolverPreset::ApplyToDriver), so this must run before that
+	// check rejects an otherwise-unconfigured actor.
+	if (ActiveLearningProgram)
+	{
+		ApplyLearningProgramNode(ActiveLearningProgram->GetEntryNode());
+	}
 
 	if (!SkeletalMesh || !MassAsset || !MuscleAsset)
 	{
@@ -430,6 +685,7 @@ void AMutoRLTrainingDriver::StartTraining()
 	// "upright" permanently unsatisfiable regardless of the policy.
 	Config.LocalUpAxis = StandingTorsoRot.UnrotateVector(FVector::UpVector);
 	Config.MaxTorquePerDOF = MaxTorquePerDOF;
+	Config.MuscleActivationThresholdMultiplier = MuscleActivationThresholdMultiplier;
 	Config.MinUprightDot = MinUprightDot;
 	Config.MinHeightFraction = MinHeightFraction;
 	Config.AliveBonus = AliveBonus;
@@ -440,15 +696,94 @@ void AMutoRLTrainingDriver::StartTraining()
 	Config.RewardHeightMultiplier = RewardHeightMultiplier;
 	Config.RewardEnergyConsumptionMultiplier = RewardEnergyConsumptionMultiplier;
 	Config.RewardMusclesUseMultiplier = RewardMusclesUseMultiplier;
+	Config.GlobalRewardScale = GlobalRewardScale;
+	Config.GlobalRewardOffset = GlobalRewardOffset;
 
 	StandingTorsoPos = FVector(0.0f, 0.0f, Config.TargetTorsoHeight);
+	RestTorsoHeight = Config.TargetTorsoHeight;
 	ResetStream = FRandomStream(ResetRandomSeed);
 
-	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: %d bodies, %d DOF, %d contact points, %d envs, TargetTorsoHeight=%.1f"),
-		Topo.NumBodies, Topo.NumDOF, ContactPoints.Num(), NumEnvs, Config.TargetTorsoHeight);
+	// ---- Imitation: bake the reference ONCE, here, on the game thread ----
+	//
+	// Deliberately before the Learning Agents wiring below, because whether the
+	// bake succeeded determines the observation size (the phase component) that
+	// SpecifyAgentObservation is about to be asked for.
+	Config.ObjectiveMode = (CreatureRLEnvironment::EObjectiveMode)(uint8)ObjectiveMode;
+	ApplyLiveImitationTuning();
+	ReferenceMotionBaked = CreatureImitation::FReferenceMotion();
+	EnvPhaseOffset.Init(0.0f, NumEnvs);
+	EnvEpisodeTime.Init(0.0f, NumEnvs);
+
+	if (Config.ObjectiveMode == CreatureRLEnvironment::EObjectiveMode::Imitation)
+	{
+		if (!ReferenceMotion)
+		{
+			// Not fatal: ComputeReward falls back to the standing terms when no
+			// frame is supplied, so this degrades to the objective that has
+			// always worked rather than to a reward of zero that would look
+			// like a broken policy.
+			UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver: ObjectiveMode is Imitation but no ReferenceMotion is assigned — falling back to the standing objective."));
+		}
+		else
+		{
+			TArray<int32> EndEffectorBodies;
+			TArray<FString> ImitationWarnings;
+			ImitationBake::ResolveEndEffectorBodies(Topo, BodyDebugNames, EndEffectorBoneNames, EndEffectorBodies, ImitationWarnings);
+
+			const float ClipLength = ReferenceMotion->GetPlayLength();
+			const float BakeStart = bImitateFullClip ? 0.0f : FMath::Clamp(ReferencePoseTime, 0.0f, ClipLength);
+			const float BakeEnd = bImitateFullClip ? ClipLength : BakeStart;
+
+			if (!ImitationBake::BakeReferenceMotion(*SkeletalMesh, *ReferenceMotion, Topo, EndEffectorBodies,
+				BakeStart, BakeEnd, ReferenceSampleRate, bReferenceMotionLoops, ReferenceMotionBaked, ImitationWarnings))
+			{
+				UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver: reference motion bake FAILED — falling back to the standing objective."));
+				ReferenceMotionBaked = CreatureImitation::FReferenceMotion();
+			}
+
+			for (const FString& Warning : ImitationWarnings)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("%s"), *Warning);
+			}
+
+			if (ReferenceMotionBaked.IsValid())
+			{
+				UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: baked '%s' — %d frame(s), %.2fs, looping=%d, %d end-effector(s), max off-axis residual %.1f deg."),
+					*ReferenceMotion->GetName(), ReferenceMotionBaked.Frames.Num(), ReferenceMotionBaked.Duration,
+					ReferenceMotionBaked.bLooping ? 1 : 0, EndEffectorBodies.Num(),
+					FMath::RadiansToDegrees(ReferenceMotionBaked.MaxRevoluteResidualRad));
+			}
+		}
+	}
+
+	// Only a multi-frame reference needs a phase input; a single pose's target
+	// never changes, so the phase would be a constant the network has to learn
+	// to ignore. Keeping it off for phase-1 pose imitation is also what leaves
+	// the observation layout — and therefore every already-saved network —
+	// compatible.
+	Config.bAppendPhaseObservation = bImitateFullClip && ReferenceMotionBaked.IsValid() && !ReferenceMotionBaked.IsSingleFrame();
+
+	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: %d bodies, %d DOF, %d contact points, %d envs, TargetTorsoHeight=%.1f, objective=%s, observationSize=%d%s"),
+		Topo.NumBodies, Topo.NumDOF, ContactPoints.Num(), NumEnvs, Config.TargetTorsoHeight,
+		Config.ObjectiveMode == CreatureRLEnvironment::EObjectiveMode::Imitation ? TEXT("Imitation") : TEXT("Standing"),
+		CreatureRLEnvironment::GetObservationSize(Topo, ContactPoints.Num(), Config.bAppendPhaseObservation),
+		Config.bAppendPhaseObservation ? TEXT(" (includes phase — networks saved WITHOUT it cannot be loaded)") : TEXT(""));
 
 	// ---- Wire up Learning Agents (see class comment: one headless driver, no per-env actors) ----
-	Manager = NewObject<ULearningAgentsManager>(this, TEXT("LAManager"));
+	// Globally-unique generated name, not a fixed literal -- every other
+	// object StartTraining() creates goes through Epic's own MakePolicy/
+	// MakeCritic/MakeInteractor/MakeTrainingEnvironment/MakePPOTrainer, all of
+	// which internally call MakeUniqueObjectName(...GloballyUnique) rather
+	// than using their "Policy"/"Critic"/etc. Name argument literally (see
+	// ULearningAgentsPolicy::MakePolicy, LearningAgentsPolicy.cpp) -- this was
+	// the one place in this function using a literal FName instead, and the
+	// only difference found after two failed fix attempts (Transient on these
+	// UPROPERTYs, then explicitly nulling them in StopTrainingInternal) for
+	// the "Class which was marked abstract was trying to be loaded ... nulled
+	// out on save" ensure that fires from inside this function's own
+	// StaticConstructObject_Internal call, every single StartTraining(), even
+	// on a fresh PIE session's first-ever call.
+	Manager = NewObject<ULearningAgentsManager>(this, MakeUniqueObjectName(this, ULearningAgentsManager::StaticClass(), TEXT("LAManager")));
 	// ORDER IS LOAD-BEARING — RegisterComponent() BEFORE SetMaxAgentNum().
 	//
 	// Root cause of the long-running "Tried to add experience from episode
@@ -538,7 +873,7 @@ void AMutoRLTrainingDriver::StartTraining()
 	AgentObjects.Reserve(NumEnvs);
 	for (int32 Env = 0; Env < NumEnvs; ++Env)
 	{
-		UObject* AgentObject = NewObject<UObject>(this);
+		UObject* AgentObject = NewObject<UMutoRLAgentHandle>(this);
 		AgentObjects.Add(AgentObject);
 		AgentPtrs.Add(AgentObject);
 	}
@@ -688,6 +1023,13 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 		return false;
 	}
 
+	// Checked here, right after RunTraining() -- which is what actually
+	// advances EpisodeCount/TrainingStepCount via GatherAgentReward/
+	// ResetAgentEpisode above -- so a transition sees this step's freshest
+	// counters instead of last step's. See TickLearningProgramTransitions's
+	// comment for why writing Driver UPROPERTYs here needs no extra locking.
+	TickLearningProgramTransitions();
+
 	// Advance the physics using the actions just written, internally
 	// substepped for contact stability (see PhysicsSubstepDt's comment).
 	// Batch/Solver are mutated here and nowhere else in this driver's own
@@ -699,6 +1041,14 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 	const double StepPhysicsStartTime = FPlatformTime::Seconds();
 	StepPhysicsSubstepped(FixedDt);
 	const double StepPhysicsSeconds = FPlatformTime::Seconds() - StepPhysicsStartTime;
+
+	// The reference clip advances with SIMULATED time (FixedDt), not wall
+	// clock -- the training thread runs as fast as it can and its real-time
+	// rate varies with load, so a wall-clock phase would drift against the
+	// physics the reward is measuring. Advanced once per step here rather
+	// than once per agent inside the callbacks, which would multiply it by
+	// NumEnvs.
+	AdvanceImitationClock(FixedDt);
 
 	// Agent+physics-tick heartbeat -- shares the "[AS-TRACE]" prefix with the
 	// embedded viewport's own mesh-show heartbeat and the Ragdoll/Visualizer
@@ -713,7 +1063,11 @@ bool AMutoRLTrainingDriver::RunOneTrainingStep()
 	// separates "training is slow because of Learning Agents/Python" from
 	// "training is slow because of our own physics step" instead of leaving
 	// both bundled into one unexplained per-step wall-clock number.
-	UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLTrainingDriver: agent+physics-tick heartbeat -- step=%d runTrainingMs=%.1f stepPhysicsMs=%.1f torsoZ(env0)=%.2f."),
+	// Verbose, not Log -- floods the log during a real training run since
+	// it's deliberately unthrottled (see the comment above). Re-enable with
+	// `Log LogTemp Verbose` if the training-vs-physics timing breakdown is
+	// needed again.
+	UE_LOG(LogTemp, Verbose, TEXT("[AS-TRACE] AMutoRLTrainingDriver: agent+physics-tick heartbeat -- step=%d runTrainingMs=%.1f stepPhysicsMs=%.1f torsoZ(env0)=%.2f."),
 		TrainingStepCount.load(std::memory_order_relaxed) + 1, RunTrainingSeconds * 1000.0, StepPhysicsSeconds * 1000.0, (float)Batch.GetBodyPos(0, 0).Z);
 
 	// See AutoSaveIntervalSeconds's comment: this is the only autosave that
@@ -831,7 +1185,7 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 		// Resolving inside this loop means contact is solved once per SUBSTEP.
 		{
 			const double T0 = FPlatformTime::Seconds();
-			Solver.Step(Batch, ActualSubstepDt, Gravity);
+			Solver.Step(Batch, ActualSubstepDt, Gravity, GlobalMuscleStrengthScale);
 			StepSeconds += FPlatformTime::Seconds() - T0;
 		}
 
@@ -893,7 +1247,11 @@ void AMutoRLTrainingDriver::StepPhysicsSubstepped(float TotalDt)
 	// defaults to true on the C++ class, but a per-instance level override
 	// (e.g. from earlier contact-tuning experiments) would silently make the
 	// 2026-08-25 parallelization dead code for this specific placed actor.
-	UE_LOG(LogTemp, Log, TEXT("[AS-TRACE] AMutoRLTrainingDriver::StepPhysicsSubstepped: %d substeps -- stepMs=%.1f dampingMs=%.1f weldLockMs=%.1f contactMs=%.1f bUseGlobalSolve=%d (contact = ground+jointLimit+limbCollision combined)."),
+	// Verbose, not Log -- fires once per StepPhysicsSubstepped call (every
+	// training step) with no throttle, flooding the log during a real
+	// training run. Re-enable with `Log LogTemp Verbose` if the
+	// bUseGlobalSolve/parallelization sanity check above needs to resume.
+	UE_LOG(LogTemp, Verbose, TEXT("[AS-TRACE] AMutoRLTrainingDriver::StepPhysicsSubstepped: %d substeps -- stepMs=%.1f dampingMs=%.1f weldLockMs=%.1f contactMs=%.1f bUseGlobalSolve=%d (contact = ground+jointLimit+limbCollision combined)."),
 		NumSubsteps, StepSeconds * 1000.0, DampingSeconds * 1000.0, WeldLockSeconds * 1000.0, ContactSeconds * 1000.0, ContactParams.bUseGlobalSolve ? 1 : 0);
 }
 
@@ -951,6 +1309,117 @@ void AMutoRLTrainingDriver::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+void AMutoRLTrainingDriver::ApplyLearningProgramNode(ULearningProgramNode* Node)
+{
+	if (!Node)
+	{
+		return;
+	}
+
+	if (Node->Params)
+	{
+		Node->Params->ApplyToDriver(this);
+	}
+
+	int32 EntryStepCount = 0;
+	{
+		// Brief, dedicated lock -- see LearningProgramStateLock's comment.
+		// GetTrainingStepCount() itself is a lock-free atomic read, so it's
+		// taken before entering the lock, not while holding it.
+		EntryStepCount = GetTrainingStepCount();
+		FScopeLock Lock(&LearningProgramStateLock);
+		CurrentLearningProgramNodeId = Node->NodeId;
+		NodeEntryTrainingStepCount = EntryStepCount;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: Learning Program entered node '%s' (step=%d)."),
+		*Node->DisplayName, EntryStepCount);
+}
+
+void AMutoRLTrainingDriver::TickLearningProgramTransitions()
+{
+	if (!ActiveLearningProgram)
+	{
+		return;
+	}
+
+	ULearningProgramNode* CurrentNode = ActiveLearningProgram->FindNode(CurrentLearningProgramNodeId);
+	if (!CurrentNode)
+	{
+		return;
+	}
+
+	const int32 StepsSinceEntry = GetTrainingStepCount() - NodeEntryTrainingStepCount;
+
+	for (const FLearningProgramTransition& Transition : CurrentNode->Transitions)
+	{
+		if (!Transition.bEnabled)
+		{
+			continue;
+		}
+
+		bool bTriggered = false;
+		switch (Transition.Condition)
+		{
+		case ELearningProgramConditionType::AverageRewardTarget:
+			bTriggered = GetAverageReward() >= Transition.ThresholdValue;
+			break;
+		case ELearningProgramConditionType::StepsSinceNodeEntry:
+			bTriggered = StepsSinceEntry >= (int32)Transition.ThresholdValue;
+			break;
+		}
+
+		if (bTriggered)
+		{
+			ULearningProgramNode* TargetNode = ActiveLearningProgram->FindNode(Transition.TargetNodeId);
+			if (TargetNode)
+			{
+				ApplyLearningProgramNode(TargetNode);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver: Learning Program transition on node '%s' triggered but its target node could not be found -- staying on the current node."), *CurrentNode->DisplayName);
+			}
+			// Only the first triggered transition fires per step -- if more
+			// than one condition is met simultaneously, the array order
+			// decides, same as a Blueprint Switch node.
+			break;
+		}
+	}
+}
+
+FLearningProgramLiveState AMutoRLTrainingDriver::GetLearningProgramLiveState()
+{
+	FLearningProgramLiveState Out;
+	if (!ActiveLearningProgram)
+	{
+		return Out;
+	}
+
+	FGuid NodeId;
+	int32 EntryStepCount = 0;
+	{
+		// Brief, dedicated lock -- see LearningProgramStateLock's comment.
+		// Deliberately NOT TrainingStepLock: that one can be held for a
+		// whole, potentially minutes-long training step, and this function
+		// is called from the node graph editor's polling Tick() roughly 4
+		// times a second -- taking TrainingStepLock here would freeze the
+		// whole editor UI for however long the in-flight step takes.
+		FScopeLock Lock(&LearningProgramStateLock);
+		NodeId = CurrentLearningProgramNodeId;
+		EntryStepCount = NodeEntryTrainingStepCount;
+	}
+
+	if (NodeId.IsValid())
+	{
+		Out.bValid = true;
+		Out.CurrentNodeId = NodeId;
+		Out.AverageReward = GetAverageReward();
+		Out.StepsSinceNodeEntry = GetTrainingStepCount() - EntryStepCount;
+	}
+	return Out;
+}
+
 void AMutoRLTrainingDriver::StopTraining()
 {
 	StopTrainingInternal();
@@ -982,6 +1451,31 @@ void AMutoRLTrainingDriver::StopTrainingInternal()
 	// started, ignoring" guard forever -- StartTraining() would never run
 	// again for this actor instance until a fresh PIE session.
 	bStartTrainingCalled = false;
+
+	// Actually null these out, not just the guard flag above -- StartTraining()
+	// constructs several of these with FIXED names (NewObject<ULearningAgentsManager>(this,
+	// TEXT("LAManager")), and MakePolicy/MakeCritic/MakePPOTrainer's own "Policy"/
+	// "Critic"/"PPOTrainer" names), so a subsequent StartTraining() call on this
+	// SAME actor instance -- a manual Stop then Start in one PIE session, or a
+	// fresh PIE session duplicating an editor-world actor whose properties still
+	// held a previous session's state -- would find the OLD object still alive
+	// at that exact Outer+Name (nothing before this ever cleared the reference),
+	// and constructing a new object over/alongside it is exactly the kind of
+	// allocation collision that routes through StaticAllocateObject's "Class
+	// which was marked abstract was trying to be loaded ... nulled out on save"
+	// ensure -- confirmed present on both AMutoRLTrainingDriver and
+	// AMutoRLVisualizerActor, always inside StartTraining() at construction
+	// time, never at a level-load/deserialization callsite. Training still
+	// proceeds normally afterward (the ensure is non-fatal and the freshly
+	// requested concrete class still gets built) but the ~2.7s ensure/error-
+	// report machinery it triggers is pure waste every time this fires.
+	Manager = nullptr;
+	Interactor = nullptr;
+	Policy = nullptr;
+	Critic = nullptr;
+	TrainingEnvironment = nullptr;
+	Trainer = nullptr;
+	AgentObjects.Reset();
 }
 
 FString AMutoRLTrainingDriver::GetSnapshotDirectory() const
@@ -1042,9 +1536,23 @@ void AMutoRLTrainingDriver::SaveTrainedNetworksToAssets()
 		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: no Policy yet — start training first."));
 		return;
 	}
-	if (!SaveEncoderNetworkAsset && !SavePolicyNetworkAsset && !SaveDecoderNetworkAsset)
+	// Falls back to the matching Load*NetworkAsset slot when its own Save*
+	// slot is unset. Without this, assigning a freshly-created asset ONLY to
+	// LoadPolicyNetworkAsset (the natural thing to do -- that's the slot the
+	// "create new asset" button lives on, and the one you'd point at a
+	// checkpoint you want this run to persist into) left it permanently
+	// "None": SaveTrainedNetworksToAssets only ever wrote to the SEPARATE
+	// SavePolicyNetworkAsset slot, which nothing had populated, so Save
+	// silently no-op'd every time. An explicit Save* assignment still wins
+	// when both are set, so a genuinely different load-from/save-to pair
+	// still works exactly as before.
+	ULearningAgentsNeuralNetwork* EncoderTarget = SaveEncoderNetworkAsset ? SaveEncoderNetworkAsset : LoadEncoderNetworkAsset;
+	ULearningAgentsNeuralNetwork* PolicyTarget = SavePolicyNetworkAsset ? SavePolicyNetworkAsset : LoadPolicyNetworkAsset;
+	ULearningAgentsNeuralNetwork* DecoderTarget = SaveDecoderNetworkAsset ? SaveDecoderNetworkAsset : LoadDecoderNetworkAsset;
+
+	if (!EncoderTarget && !PolicyTarget && !DecoderTarget)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: no network assets assigned (SaveEncoderNetworkAsset/SavePolicyNetworkAsset/SaveDecoderNetworkAsset) — nothing to do."));
+		UE_LOG(LogTemp, Warning, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: no network assets assigned (Save*NetworkAsset or Load*NetworkAsset) — nothing to do."));
 		return;
 	}
 
@@ -1052,19 +1560,48 @@ void AMutoRLTrainingDriver::SaveTrainedNetworksToAssets()
 	// AMutoRLVisualizerActor's periodic refresh share — avoids reading a
 	// network mid-update.
 	FScopeLock Lock(&NetworkAccessLock);
-	if (SaveEncoderNetworkAsset)
+	if (EncoderTarget)
 	{
-		Policy->GetEncoderNetworkAsset()->SaveNetworkToAsset(SaveEncoderNetworkAsset);
+		Policy->GetEncoderNetworkAsset()->SaveNetworkToAsset(EncoderTarget);
 	}
-	if (SavePolicyNetworkAsset)
+	if (PolicyTarget)
 	{
-		Policy->GetPolicyNetworkAsset()->SaveNetworkToAsset(SavePolicyNetworkAsset);
+		Policy->GetPolicyNetworkAsset()->SaveNetworkToAsset(PolicyTarget);
 	}
-	if (SaveDecoderNetworkAsset)
+	if (DecoderTarget)
 	{
-		Policy->GetDecoderNetworkAsset()->SaveNetworkToAsset(SaveDecoderNetworkAsset);
+		Policy->GetDecoderNetworkAsset()->SaveNetworkToAsset(DecoderTarget);
 	}
-	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: saved trained networks to network assets."));
+
+#if WITH_EDITOR
+	// SaveNetworkToAsset only calls ForceMarkDirty() -- it marks the in-memory
+	// package dirty but does NOT write anything to disk. Without this, the
+	// asset held the trained weights for the rest of THIS editor session, but
+	// re-opening the project (or even just re-loading the asset) reverted it
+	// to whatever was last saved to disk, i.e. usually nothing -- which is
+	// exactly the "the asset is always None" report this was mistaken for
+	// twice before finding the real two causes (missing Save button, then the
+	// Save*/Load* slot mismatch). Saving the packages here makes one click of
+	// "Save to Assets" a COMPLETE, disk-persisted save, matching what that
+	// button name promises, instead of requiring a separate manual Ctrl+S per
+	// asset that nothing in the UI ever hinted was still necessary.
+	// bAlreadyCheckedOut=true, bCanBeDeclined=false, bPromptToSave=false:
+	// this is a background/automatic save triggered by a training tool, not
+	// a user-facing File>Save action, so no dialogs.
+	TArray<UPackage*> PackagesToSave;
+	if (EncoderTarget) { PackagesToSave.AddUnique(EncoderTarget->GetOutermost()); }
+	if (PolicyTarget) { PackagesToSave.AddUnique(PolicyTarget->GetOutermost()); }
+	if (DecoderTarget) { PackagesToSave.AddUnique(DecoderTarget->GetOutermost()); }
+	TArray<UPackage*> FailedPackages;
+	FEditorFileUtils::PromptForCheckoutAndSave(PackagesToSave, /*bCheckDirty=*/false, /*bPromptToSave=*/false, &FailedPackages, /*bAlreadyCheckedOut=*/true, /*bCanBeDeclined=*/false);
+	if (FailedPackages.Num() > 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::SaveTrainedNetworksToAssets: %d package(s) failed to save to disk -- network data was updated in memory but is NOT persisted; see the save error logged above."), FailedPackages.Num());
+		return;
+	}
+#endif
+
+	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: saved trained networks to network assets (and to disk)."));
 }
 
 void AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets()
@@ -1081,17 +1618,48 @@ void AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets()
 	}
 
 	FScopeLock Lock(&NetworkAccessLock);
+	// Policy being non-null does NOT mean its Encoder/Policy/DecoderNetwork
+	// sub-objects are populated -- GetEncoderNetworkAsset() etc. just return
+	// plain member pointers (LearningAgentsPolicy.h) that only get set the
+	// next time this Policy goes through its own network-setup path (inside
+	// StartTraining). A Policy left over from before the tool was closed and
+	// reopened (with no fresh StartTraining call in between) can be exactly
+	// this: a real, non-null Policy whose sub-network getters still return
+	// null -- calling LoadNetworkFromAsset() on that null pointer previously
+	// crashed here with EXCEPTION_ACCESS_VIOLATION reading a near-null
+	// address (the null "this" of GetPolicyNetworkAsset()'s return value).
 	if (LoadEncoderNetworkAsset)
 	{
-		Policy->GetEncoderNetworkAsset()->LoadNetworkFromAsset(LoadEncoderNetworkAsset);
+		if (ULearningAgentsNeuralNetwork* EncoderNetworkAsset = Policy->GetEncoderNetworkAsset())
+		{
+			EncoderNetworkAsset->LoadNetworkFromAsset(LoadEncoderNetworkAsset);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets: Policy has no encoder network yet -- start training first."));
+		}
 	}
 	if (LoadPolicyNetworkAsset)
 	{
-		Policy->GetPolicyNetworkAsset()->LoadNetworkFromAsset(LoadPolicyNetworkAsset);
+		if (ULearningAgentsNeuralNetwork* PolicyNetworkAsset = Policy->GetPolicyNetworkAsset())
+		{
+			PolicyNetworkAsset->LoadNetworkFromAsset(LoadPolicyNetworkAsset);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets: Policy has no policy network yet -- start training first."));
+		}
 	}
 	if (LoadDecoderNetworkAsset)
 	{
-		Policy->GetDecoderNetworkAsset()->LoadNetworkFromAsset(LoadDecoderNetworkAsset);
+		if (ULearningAgentsNeuralNetwork* DecoderNetworkAsset = Policy->GetDecoderNetworkAsset())
+		{
+			DecoderNetworkAsset->LoadNetworkFromAsset(LoadDecoderNetworkAsset);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("AMutoRLTrainingDriver::LoadTrainedNetworksFromAssets: Policy has no decoder network yet -- start training first."));
+		}
 	}
 	UE_LOG(LogTemp, Log, TEXT("AMutoRLTrainingDriver: loaded trained networks from network assets."));
 }
